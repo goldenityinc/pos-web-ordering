@@ -78,8 +78,8 @@ export default function HomePage() {
         setBranchInfo(menu.branch);
 
         const resolvedTenantName = [
-          menu.tenant?.name?.trim(),
           storeNameFromUrl,
+          menu.tenant?.name?.trim(),
           menu.tenant?.slug?.trim(),
           tenantId,
         ].find((value) => Boolean(value)) || "Customer Ordering";
@@ -538,7 +538,14 @@ export default function HomePage() {
                   </div>
 
                   <div className="mt-4 rounded-xl border border-slate-100 p-3">
+                    <div className="mb-3 rounded-lg border border-amber-100 bg-amber-50 px-3 py-2 text-sm text-amber-900">
+                      Pembayaran dilakukan di kasir. Pesanan ini belum terhubung ke payment gateway.
+                    </div>
                     <div className="flex items-center justify-between text-sm">
+                      <span className="text-slate-500">Metode Pembayaran</span>
+                      <span className="font-semibold text-slate-900">Bayar di Kasir</span>
+                    </div>
+                    <div className="mt-2 flex items-center justify-between text-sm">
                       <span className="text-slate-500">Subtotal</span>
                       <span className="font-semibold text-slate-900">{rupiahFormatter.format(cartSummary.total)}</span>
                     </div>
@@ -564,7 +571,7 @@ export default function HomePage() {
                   >
                     {isSubmitting
                       ? "Mengirim pesanan..."
-                      : `Pesan & Bayar (${rupiahFormatter.format(cartSummary.total)})`}
+                      : `Pesan ke Kasir (${rupiahFormatter.format(cartSummary.total)})`}
                   </button>
                 </div>
               </>
