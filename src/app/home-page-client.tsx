@@ -4,6 +4,7 @@ import { useEffect, useMemo, useState } from "react";
 import { useSearchParams } from "next/navigation";
 import {
   getMenu,
+  BranchInfo,
   MenuCategory,
   MenuProduct,
   OrderItemInput,
@@ -35,13 +36,20 @@ export default function HomePage() {
     searchParams.get("tableId")?.trim() || searchParams.get("table_id")?.trim() || "";
   const storeNameFromUrl =
     searchParams.get("store")?.trim() || searchParams.get("storeName")?.trim() || "";
+  const branchId =
+    searchParams.get("branchId")?.trim() || searchParams.get("branch_id")?.trim() || "";
+  const branchNameFromUrl =
+    searchParams.get("branchName")?.trim() || searchParams.get("branch_name")?.trim() || "";
 
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [tenantName, setTenantName] = useState<string>("");
+  const [branchInfo, setBranchInfo] = useState<BranchInfo | undefined>(undefined);
   const [categories, setCategories] = useState<MenuCategory[]>([]);
   const [products, setProducts] = useState<MenuProduct[]>([]);
   const [cart, setCart] = useState<CartMap>({});
+  const [searchText, setSearchText] = useState("");
+  const [activeCategoryId, setActiveCategoryId] = useState<string>("all");
   const [isCheckoutOpen, setIsCheckoutOpen] = useState(false);
   const [notes, setNotes] = useState("");
   const [isSubmitting, setIsSubmitting] = useState(false);
@@ -61,12 +69,20 @@ export default function HomePage() {
       setError(null);
 
       try {
-        const menu = await getMenu(tenantId);
+        const menu = await getMenu(tenantId, {
+          branchId,
+          branchName: branchNameFromUrl,
+        });
         setCategories(menu.categories);
         setProducts(menu.products.filter((item) => item.isAvailable));
+        setBranchInfo(menu.branch);
 
-        const resolvedTenantName =
-          menu.tenant?.name?.trim() || menu.tenant?.slug?.trim() || storeNameFromUrl || tenantId;
+        const resolvedTenantName = [
+          menu.tenant?.name?.trim(),
+          storeNameFromUrl,
+          menu.tenant?.slug?.trim(),
+          tenantId,
+        ].find((value) => Boolean(value)) || "Customer Ordering";
 
         setTenantName(resolvedTenantName);
       } catch (err) {
@@ -75,13 +91,25 @@ export default function HomePage() {
         setError(message);
         setCategories([]);
         setProducts([]);
+        setBranchInfo(undefined);
       } finally {
         setLoading(false);
       }
     };
 
     void run();
-  }, [storeNameFromUrl, tenantId]);
+  }, [branchId, branchNameFromUrl, storeNameFromUrl, tenantId]);
+
+  useEffect(() => {
+    if (activeCategoryId === "all") {
+      return;
+    }
+
+    const categoryExists = categories.some((category) => category.id === activeCategoryId);
+    if (!categoryExists) {
+      setActiveCategoryId("all");
+    }
+  }, [activeCategoryId, categories]);
 
   useEffect(() => {
     if (!isCheckoutOpen) {
@@ -111,6 +139,7 @@ export default function HomePage() {
   }, [cart, products]);
 
   const groupedSections = useMemo<GroupedMenuSection[]>(() => {
+    const normalizedSearch = searchText.trim().toLowerCase();
     const groups = new Map<string, GroupedMenuSection>();
 
     for (const category of categories) {
@@ -125,6 +154,20 @@ export default function HomePage() {
     const uncategorizedName = "Lainnya";
 
     for (const item of products) {
+      if (activeCategoryId !== "all" && (item.categoryId || "uncategorized") !== activeCategoryId) {
+        continue;
+      }
+
+      if (normalizedSearch) {
+        const haystack = [item.name, item.categoryName, item.description]
+          .filter(Boolean)
+          .join(" ")
+          .toLowerCase();
+        if (!haystack.includes(normalizedSearch)) {
+          continue;
+        }
+      }
+
       const groupId = item.categoryId || uncategorizedId;
       const fallbackName = item.categoryName || uncategorizedName;
 
@@ -149,7 +192,16 @@ export default function HomePage() {
     );
 
     return [...knownSections, ...extraSections];
-  }, [categories, products]);
+  }, [activeCategoryId, categories, products, searchText]);
+
+  const visibleCategoryChips = useMemo(() => {
+    return [
+      { id: "all", name: "Semua" },
+      ...categories.filter((category) =>
+        groupedSections.some((section) => section.id === category.id),
+      ),
+    ];
+  }, [categories, groupedSections]);
 
   const cartItems = useMemo(() => {
     const rows: Array<{
@@ -247,6 +299,7 @@ export default function HomePage() {
         tenantId,
         table: tableNumber,
         tableId,
+        branchId,
         cartItems: payloadItems,
         totalAmount: cartSummary.total,
         notes,
@@ -273,9 +326,16 @@ export default function HomePage() {
           <h1 className="mt-2 text-2xl font-bold leading-tight text-slate-900">
             {tenantName || "Customer Ordering"}
           </h1>
-          <span className="mt-3 inline-flex rounded-full bg-orange-100 px-3 py-1 text-xs font-semibold text-orange-700">
-            Meja: {tableNumber}
-          </span>
+          <div className="mt-3 flex flex-wrap gap-2">
+            <span className="inline-flex rounded-full bg-orange-100 px-3 py-1 text-xs font-semibold text-orange-700">
+              Meja: {tableNumber}
+            </span>
+            {(branchInfo?.name || branchNameFromUrl) ? (
+              <span className="inline-flex rounded-full bg-slate-100 px-3 py-1 text-xs font-semibold text-slate-700">
+                Cabang: {branchInfo?.name || branchNameFromUrl}
+              </span>
+            ) : null}
+          </div>
         </header>
 
         {!tenantId ? (
@@ -291,6 +351,41 @@ export default function HomePage() {
         ) : null}
 
         <section className="mt-4 space-y-5">
+          {!loading && !error && products.length > 0 ? (
+            <div className="sticky top-3 z-10 space-y-3 rounded-2xl bg-white/90 p-3 shadow-sm ring-1 ring-orange-100 backdrop-blur">
+              <div className="flex items-center gap-2 rounded-xl border border-orange-100 bg-orange-50 px-3 py-2">
+                <span className="text-sm text-orange-500">⌕</span>
+                <input
+                  type="search"
+                  value={searchText}
+                  onChange={(event) => setSearchText(event.target.value)}
+                  placeholder="Cari menu atau kategori"
+                  className="w-full bg-transparent text-sm text-slate-700 outline-none placeholder:text-slate-400"
+                />
+              </div>
+
+              <div className="flex gap-2 overflow-x-auto pb-1">
+                {visibleCategoryChips.map((category) => {
+                  const isActive = activeCategoryId === category.id;
+                  return (
+                    <button
+                      key={category.id}
+                      type="button"
+                      onClick={() => setActiveCategoryId(category.id)}
+                      className={`shrink-0 rounded-full px-3 py-1.5 text-xs font-semibold transition ${
+                        isActive
+                          ? "bg-slate-900 text-white"
+                          : "bg-slate-100 text-slate-600"
+                      }`}
+                    >
+                      {category.name}
+                    </button>
+                  );
+                })}
+              </div>
+            </div>
+          ) : null}
+
           {loading ? (
             <div className="rounded-xl bg-white p-4 text-sm text-slate-600 shadow-sm ring-1 ring-orange-100">
               Memuat menu...
@@ -300,6 +395,12 @@ export default function HomePage() {
           {!loading && !error && products.length === 0 && tenantId ? (
             <div className="rounded-xl bg-white p-4 text-sm text-slate-600 shadow-sm ring-1 ring-orange-100">
               Menu belum tersedia.
+            </div>
+          ) : null}
+
+          {!loading && !error && products.length > 0 && groupedSections.length === 0 ? (
+            <div className="rounded-xl bg-white p-4 text-sm text-slate-600 shadow-sm ring-1 ring-orange-100">
+              Tidak ada menu yang cocok dengan pencarian atau filter kategori.
             </div>
           ) : null}
 

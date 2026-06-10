@@ -32,10 +32,22 @@ export interface TenantInfo {
   slug?: string;
 }
 
+export interface BranchInfo {
+  id?: string;
+  name?: string;
+  code?: string;
+}
+
 export interface MenuResponse {
   tenant?: TenantInfo;
+  branch?: BranchInfo;
   categories: MenuCategory[];
   products: MenuProduct[];
+}
+
+export interface GetMenuOptions {
+  branchId?: string;
+  branchName?: string;
 }
 
 export interface OrderItemInput {
@@ -50,6 +62,7 @@ export interface SubmitOrderInput {
   tenantId: string;
   table: string;
   tableId?: string;
+  branchId?: string;
   cartItems: OrderItemInput[];
   totalAmount: number;
   notes?: string;
@@ -69,6 +82,7 @@ interface RawApiResponse {
   tenantSlug?: unknown;
   storeName?: unknown;
   name?: unknown;
+  branch?: BranchInfo;
   categories?: unknown[];
   products?: unknown[];
   items?: unknown[];
@@ -190,14 +204,25 @@ function normalizeProduct(raw: unknown): MenuProduct | null {
   };
 }
 
-export async function getMenu(tenantId: string): Promise<MenuResponse> {
+export async function getMenu(
+  tenantId: string,
+  options: GetMenuOptions = {},
+): Promise<MenuResponse> {
   if (!tenantId) {
     throw new Error("tenantId is required to fetch menu.");
   }
 
-  const url = `${BRIDGE_API_URL}/api/v1/qr-menu/${encodeURIComponent(tenantId)}`;
+  const url = new URL(`/api/v1/qr-menu/${encodeURIComponent(tenantId)}`, BRIDGE_API_URL);
+  const normalizedBranchId = options.branchId?.trim();
+  const normalizedBranchName = options.branchName?.trim();
+  if (normalizedBranchId) {
+    url.searchParams.set("branchId", normalizedBranchId);
+  }
+  if (normalizedBranchName) {
+    url.searchParams.set("branchName", normalizedBranchName);
+  }
 
-  const response = await fetch(url, {
+  const response = await fetch(url.toString(), {
     method: "GET",
     headers: {
       "Content-Type": "application/json",
@@ -234,6 +259,7 @@ export async function getMenu(tenantId: string): Promise<MenuResponse> {
     return {
       categories: Array.from(categoriesMap.values()),
       products,
+      branch: undefined,
     };
   }
 
@@ -254,6 +280,14 @@ export async function getMenu(tenantId: string): Promise<MenuResponse> {
 
   return {
     tenant: normalizeTenant(payload),
+    branch:
+      payload.branch && typeof payload.branch === "object"
+        ? {
+            id: toStringOrUndefined(payload.branch.id),
+            name: toStringOrUndefined(payload.branch.name),
+            code: toStringOrUndefined(payload.branch.code),
+          }
+        : undefined,
     categories,
     products,
   };
@@ -263,6 +297,7 @@ export async function submitOrder({
   tenantId,
   table,
   tableId,
+  branchId,
   cartItems,
   totalAmount,
   notes,
@@ -286,6 +321,8 @@ export async function submitOrder({
     table,
     tableId,
     table_id: tableId,
+    branchId: branchId?.trim() || undefined,
+    branch_id: branchId?.trim() || undefined,
     items: cartItems.map((item) => ({
       productId: item.productId,
       quantity: item.quantity,
