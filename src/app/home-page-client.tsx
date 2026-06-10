@@ -31,6 +31,10 @@ export default function HomePage() {
   const tenantId =
     searchParams.get("tenant")?.trim() || searchParams.get("tenantId")?.trim() || "";
   const tableNumber = searchParams.get("table")?.trim() || "-";
+  const tableId =
+    searchParams.get("tableId")?.trim() || searchParams.get("table_id")?.trim() || "";
+  const storeNameFromUrl =
+    searchParams.get("store")?.trim() || searchParams.get("storeName")?.trim() || "";
 
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -48,7 +52,7 @@ export default function HomePage() {
     if (!tenantId) {
       setCategories([]);
       setProducts([]);
-      setTenantName("");
+      setTenantName(storeNameFromUrl);
       return;
     }
 
@@ -62,7 +66,7 @@ export default function HomePage() {
         setProducts(menu.products.filter((item) => item.isAvailable));
 
         const resolvedTenantName =
-          menu.tenant?.name?.trim() || menu.tenant?.slug?.trim() || tenantId;
+          menu.tenant?.name?.trim() || menu.tenant?.slug?.trim() || storeNameFromUrl || tenantId;
 
         setTenantName(resolvedTenantName);
       } catch (err) {
@@ -77,7 +81,7 @@ export default function HomePage() {
     };
 
     void run();
-  }, [tenantId]);
+  }, [storeNameFromUrl, tenantId]);
 
   useEffect(() => {
     if (!isCheckoutOpen) {
@@ -242,6 +246,7 @@ export default function HomePage() {
       await submitOrder({
         tenantId,
         table: tableNumber,
+        tableId,
         cartItems: payloadItems,
         totalAmount: cartSummary.total,
         notes,

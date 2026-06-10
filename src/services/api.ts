@@ -49,6 +49,7 @@ export interface OrderItemInput {
 export interface SubmitOrderInput {
   tenantId: string;
   table: string;
+  tableId?: string;
   cartItems: OrderItemInput[];
   totalAmount: number;
   notes?: string;
@@ -211,6 +212,31 @@ export async function getMenu(tenantId: string): Promise<MenuResponse> {
   const json = (await response.json()) as RawApiResponse;
   const payload = (json.data ?? json) as RawApiResponse;
 
+  if (Array.isArray(payload)) {
+    const products = payload
+      .map(normalizeProduct)
+      .filter((item): item is MenuProduct => Boolean(item))
+      .sort((a, b) => (a.sortOrder ?? 0) - (b.sortOrder ?? 0));
+
+    const categoriesMap = new Map<string, MenuCategory>();
+    for (const product of products) {
+      const id = product.categoryId || "menu";
+      const name = product.categoryName || "Menu";
+      if (!categoriesMap.has(id)) {
+        categoriesMap.set(id, {
+          id,
+          name,
+          sortOrder: categoriesMap.size,
+        });
+      }
+    }
+
+    return {
+      categories: Array.from(categoriesMap.values()),
+      products,
+    };
+  }
+
   const categoriesRaw =
     payload.categories ?? payload.menu?.categories ?? [];
   const productsRaw =
@@ -236,6 +262,7 @@ export async function getMenu(tenantId: string): Promise<MenuResponse> {
 export async function submitOrder({
   tenantId,
   table,
+  tableId,
   cartItems,
   totalAmount,
   notes,
@@ -257,6 +284,8 @@ export async function submitOrder({
   const payload = {
     tenantId,
     table,
+    tableId,
+    table_id: tableId,
     items: cartItems.map((item) => ({
       productId: item.productId,
       quantity: item.quantity,
