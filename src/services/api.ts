@@ -1,4 +1,9 @@
-const BRIDGE_API_URL = process.env.NEXT_PUBLIC_BRIDGE_API_URL;
+const DEFAULT_BRIDGE_API_URL =
+  "https://goldenity-pos-api-bridge-production.up.railway.app";
+
+const BRIDGE_API_URL = (
+  process.env.NEXT_PUBLIC_BRIDGE_API_URL?.trim() || DEFAULT_BRIDGE_API_URL
+).replace(/\/$/, "");
 
 export interface MenuCategory {
   id: string;
@@ -58,6 +63,11 @@ export interface SubmitOrderResponse {
 interface RawApiResponse {
   data?: unknown;
   tenant?: TenantInfo;
+  tenantId?: unknown;
+  tenantName?: unknown;
+  tenantSlug?: unknown;
+  storeName?: unknown;
+  name?: unknown;
   categories?: unknown[];
   products?: unknown[];
   items?: unknown[];
@@ -65,6 +75,29 @@ interface RawApiResponse {
     categories?: unknown[];
     products?: unknown[];
     items?: unknown[];
+  };
+}
+
+function normalizeTenant(payload: RawApiResponse): TenantInfo | undefined {
+  const fromTenant = payload.tenant;
+  const id =
+    toStringOrUndefined(fromTenant?.id) ?? toStringOrUndefined(payload.tenantId);
+  const name =
+    toStringOrUndefined(fromTenant?.name) ??
+    toStringOrUndefined(payload.tenantName) ??
+    toStringOrUndefined(payload.storeName) ??
+    toStringOrUndefined(payload.name);
+  const slug =
+    toStringOrUndefined(fromTenant?.slug) ?? toStringOrUndefined(payload.tenantSlug);
+
+  if (!id && !name && !slug) {
+    return undefined;
+  }
+
+  return {
+    id,
+    name,
+    slug,
   };
 }
 
@@ -161,10 +194,6 @@ export async function getMenu(tenantId: string): Promise<MenuResponse> {
     throw new Error("tenantId is required to fetch menu.");
   }
 
-  if (!BRIDGE_API_URL) {
-    throw new Error("NEXT_PUBLIC_BRIDGE_API_URL is missing. Check .env.local configuration.");
-  }
-
   const url = `${BRIDGE_API_URL}/api/v1/qr-menu/${encodeURIComponent(tenantId)}`;
 
   const response = await fetch(url, {
@@ -198,7 +227,7 @@ export async function getMenu(tenantId: string): Promise<MenuResponse> {
     .sort((a, b) => (a.sortOrder ?? 0) - (b.sortOrder ?? 0));
 
   return {
-    tenant: payload.tenant,
+    tenant: normalizeTenant(payload),
     categories,
     products,
   };
@@ -221,10 +250,6 @@ export async function submitOrder({
 
   if (!Array.isArray(cartItems) || cartItems.length === 0) {
     throw new Error("cartItems cannot be empty.");
-  }
-
-  if (!BRIDGE_API_URL) {
-    throw new Error("NEXT_PUBLIC_BRIDGE_API_URL is missing. Check .env.local configuration.");
   }
 
   const url = `${BRIDGE_API_URL}/api/v1/qr-orders`;

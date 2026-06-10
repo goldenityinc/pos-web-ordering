@@ -34,7 +34,7 @@ export default function HomePage() {
 
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [tenantName, setTenantName] = useState<string>("Goldenity Resto");
+  const [tenantName, setTenantName] = useState<string>("");
   const [categories, setCategories] = useState<MenuCategory[]>([]);
   const [products, setProducts] = useState<MenuProduct[]>([]);
   const [cart, setCart] = useState<CartMap>({});
@@ -48,7 +48,7 @@ export default function HomePage() {
     if (!tenantId) {
       setCategories([]);
       setProducts([]);
-      setTenantName("Goldenity Resto");
+      setTenantName("");
       return;
     }
 
@@ -266,7 +266,7 @@ export default function HomePage() {
             Customer Ordering
           </p>
           <h1 className="mt-2 text-2xl font-bold leading-tight text-slate-900">
-            {tenantName}
+            {tenantName || "Customer Ordering"}
           </h1>
           <span className="mt-3 inline-flex rounded-full bg-orange-100 px-3 py-1 text-xs font-semibold text-orange-700">
             Meja: {tableNumber}
