@@ -19,6 +19,7 @@ export interface MenuProduct {
   categoryName?: string | null;
   name: string;
   description?: string | null;
+  image_url?: string | null;
   imageUrl?: string | null;
   sku?: string | null;
   price: number;
@@ -201,6 +202,10 @@ function normalizeProduct(raw: unknown): MenuProduct | null {
       toNullableString(data.categoryId) ?? toNullableString(data.menuCategoryId) ?? null,
     categoryName: toNullableString(data.categoryName) ?? null,
     description: toNullableString(data.description),
+    image_url:
+      toNullableString(data.image_url) ??
+      toNullableString(data.imageUrl) ??
+      toNullableString(data.image),
     imageUrl: toNullableString(data.imageUrl) ?? toNullableString(data.image),
     sku: toNullableString(data.sku),
     price: toNumber(data.price, 0),

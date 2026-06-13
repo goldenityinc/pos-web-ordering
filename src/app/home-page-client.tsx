@@ -445,78 +445,100 @@ export default function HomePage() {
                   const isOutOfStock =
                     !product.is_available ||
                     (!product.isAvailable && (product.stock ?? 0) <= 0);
+                  const productImage =
+                    product.image_url?.trim() ||
+                    product.imageUrl?.trim() ||
+                    "https://placehold.co/400x400/eeeeee/999999?text=No+Image";
 
                   return (
                     <article
                       key={product.id}
-                      className={`flex items-center justify-between gap-3 rounded-xl p-4 shadow-sm ring-1 ${
+                      className={`flex items-start gap-4 rounded-2xl p-4 shadow-sm ring-1 ${
                         isOutOfStock
                           ? "bg-slate-100 ring-slate-200"
                           : "bg-white ring-orange-100"
                       }`}
                     >
-                      <div className="min-w-0">
-                        <h3 className={`truncate text-sm font-semibold ${isOutOfStock ? "text-slate-500" : "text-slate-900"}`}>
-                          {product.name}
-                        </h3>
-                        <p className={`mt-1 text-sm font-medium ${isOutOfStock ? "text-slate-400" : "text-orange-600"}`}>
-                          {rupiahFormatter.format(product.price)}
-                        </p>
-                        {isOutOfStock ? (
-                          <p className="mt-1 text-xs font-semibold uppercase tracking-wide text-rose-600">
-                            Habis
-                          </p>
-                        ) : null}
+                      <div className="h-24 w-24 shrink-0 overflow-hidden rounded-xl bg-gray-100">
+                        <img
+                          src={productImage}
+                          alt={product.name}
+                          className="h-full w-full object-cover"
+                          loading="lazy"
+                          onError={(event) => {
+                            event.currentTarget.src =
+                              "https://placehold.co/400x400/eeeeee/999999?text=No+Image";
+                          }}
+                        />
                       </div>
 
-                      {quantity === 0 ? (
-                        <button
-                          type="button"
-                          onClick={() => {
-                            if (isOutOfStock) {
-                              return;
-                            }
-                            addToCart(product.id);
-                          }}
-                          disabled={isOutOfStock}
-                          className={`inline-flex h-9 w-9 shrink-0 items-center justify-center rounded-full text-lg font-bold text-white shadow-sm transition ${
-                            isOutOfStock
-                              ? "cursor-not-allowed bg-slate-400"
-                              : "bg-orange-500 hover:bg-orange-600 active:scale-95"
-                          }`}
-                          aria-label={`Add ${product.name} to cart`}
-                        >
-                          +
-                        </button>
-                      ) : (
-                        <div className="inline-flex h-9 shrink-0 items-center rounded-full bg-orange-100 p-1 text-orange-700">
-                          <button
-                            type="button"
-                            onClick={() => decreaseFromCart(product.id)}
-                            className="inline-flex h-7 w-7 items-center justify-center rounded-full bg-white text-base font-bold shadow-sm"
-                            aria-label={`Decrease ${product.name}`}
-                          >
-                            -
-                          </button>
-                          <span className="inline-block min-w-8 px-2 text-center text-sm font-bold">{quantity}</span>
-                          <button
-                            type="button"
-                            onClick={() => {
-                              if (isOutOfStock) {
-                                return;
-                              }
-                              addToCart(product.id);
-                            }}
-                            disabled={isOutOfStock}
-                            className={`inline-flex h-7 w-7 items-center justify-center rounded-full text-base font-bold text-white shadow-sm ${
-                              isOutOfStock ? "cursor-not-allowed bg-slate-400" : "bg-orange-500"
-                            }`}
-                            aria-label={`Increase ${product.name}`}
-                          >
-                            +
-                          </button>
+                      <div className="ml-0 flex flex-1 flex-col justify-between">
+                        <div>
+                          <h3 className={`text-base font-bold leading-snug ${isOutOfStock ? "text-slate-500" : "text-gray-900"}`}>
+                            {product.name}
+                          </h3>
+                          {isOutOfStock ? (
+                            <p className="mt-1 text-xs font-semibold uppercase tracking-wide text-rose-600">
+                              Habis
+                            </p>
+                          ) : null}
                         </div>
-                      )}
+
+                        <div className="mt-3 flex items-center justify-between gap-3">
+                          <p className={`text-base font-bold ${isOutOfStock ? "text-slate-400" : "text-gray-800"}`}>
+                            {rupiahFormatter.format(product.price)}
+                          </p>
+
+                          {quantity === 0 ? (
+                            <button
+                              type="button"
+                              onClick={() => {
+                                if (isOutOfStock) {
+                                  return;
+                                }
+                                addToCart(product.id);
+                              }}
+                              disabled={isOutOfStock}
+                              className={`inline-flex h-10 w-10 shrink-0 items-center justify-center rounded-lg text-xl font-bold text-white transition ${
+                                isOutOfStock
+                                  ? "cursor-not-allowed bg-slate-400"
+                                  : "bg-orange-500 hover:bg-orange-600 active:scale-95"
+                              }`}
+                              aria-label={`Add ${product.name} to cart`}
+                            >
+                              +
+                            </button>
+                          ) : (
+                            <div className="inline-flex h-10 shrink-0 items-center rounded-lg bg-orange-100 px-1 text-orange-700">
+                              <button
+                                type="button"
+                                onClick={() => decreaseFromCart(product.id)}
+                                className="inline-flex h-8 w-8 items-center justify-center rounded-md bg-white text-lg font-bold shadow-sm"
+                                aria-label={`Decrease ${product.name}`}
+                              >
+                                -
+                              </button>
+                              <span className="inline-block min-w-9 px-2 text-center text-sm font-bold">{quantity.toString().padStart(2, "0")}</span>
+                              <button
+                                type="button"
+                                onClick={() => {
+                                  if (isOutOfStock) {
+                                    return;
+                                  }
+                                  addToCart(product.id);
+                                }}
+                                disabled={isOutOfStock}
+                                className={`inline-flex h-8 w-8 items-center justify-center rounded-md text-lg font-bold text-white shadow-sm ${
+                                  isOutOfStock ? "cursor-not-allowed bg-slate-400" : "bg-orange-500"
+                                }`}
+                                aria-label={`Increase ${product.name}`}
+                              >
+                                +
+                              </button>
+                            </div>
+                          )}
+                        </div>
+                      </div>
                     </article>
                   );
                 })}
