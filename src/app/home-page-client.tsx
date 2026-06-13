@@ -19,7 +19,12 @@ const rupiahFormatter = new Intl.NumberFormat("id-ID", {
   maximumFractionDigits: 0,
 });
 
-type CartMap = Record<string, number>;
+type CartItemState = {
+  quantity: number;
+  note?: string;
+};
+
+type CartMap = Record<string, CartItemState>;
 type GroupedMenuSection = {
   id: string;
   name: string;
@@ -74,7 +79,7 @@ export default function HomePage() {
           branchName: branchNameFromUrl,
         });
         setCategories(menu.categories);
-        setProducts(menu.products.filter((item) => item.isAvailable));
+        setProducts(menu.products);
         setBranchInfo(menu.branch);
 
         const resolvedTenantName = [
@@ -128,7 +133,7 @@ export default function HomePage() {
     let total = 0;
 
     for (const product of products) {
-      const quantity = cart[product.id] ?? 0;
+      const quantity = cart[product.id]?.quantity ?? 0;
       if (quantity > 0) {
         itemCount += quantity;
         total += quantity * product.price;
@@ -210,9 +215,11 @@ export default function HomePage() {
       quantity: number;
       price: number;
       subtotal: number;
+      note?: string;
     }> = [];
 
-    for (const [productId, quantity] of Object.entries(cart)) {
+    for (const [productId, item] of Object.entries(cart)) {
+      const quantity = item.quantity;
       if (quantity <= 0) {
         continue;
       }
@@ -228,6 +235,7 @@ export default function HomePage() {
         quantity,
         price: product.price,
         subtotal: product.price * quantity,
+        note: item.note,
       });
     }
 
@@ -237,13 +245,16 @@ export default function HomePage() {
   const addToCart = (productId: string) => {
     setCart((prev) => ({
       ...prev,
-      [productId]: (prev[productId] ?? 0) + 1,
+      [productId]: {
+        quantity: (prev[productId]?.quantity ?? 0) + 1,
+        note: prev[productId]?.note,
+      },
     }));
   };
 
   const decreaseFromCart = (productId: string) => {
     setCart((prev) => {
-      const current = prev[productId] ?? 0;
+      const current = prev[productId]?.quantity ?? 0;
       if (current <= 1) {
         const { [productId]: _removed, ...rest } = prev;
         return rest;
@@ -251,7 +262,27 @@ export default function HomePage() {
 
       return {
         ...prev,
-        [productId]: current - 1,
+        [productId]: {
+          quantity: current - 1,
+          note: prev[productId]?.note,
+        },
+      };
+    });
+  };
+
+  const updateItemNote = (productId: string, newNote: string) => {
+    setCart((prev) => {
+      const existing = prev[productId];
+      if (!existing || existing.quantity <= 0) {
+        return prev;
+      }
+
+      return {
+        ...prev,
+        [productId]: {
+          ...existing,
+          note: newNote,
+        },
       };
     });
   };
@@ -293,6 +324,7 @@ export default function HomePage() {
         price: item.price,
         name: item.name,
         subtotal: item.subtotal,
+        note: item.note,
       }));
 
       await submitOrder({
@@ -409,25 +441,49 @@ export default function HomePage() {
               <h2 className="mb-3 text-base font-extrabold tracking-wide text-slate-900">{section.name}</h2>
               <div className="space-y-3">
                 {section.items.map((product) => {
-                  const quantity = cart[product.id] ?? 0;
+                  const quantity = cart[product.id]?.quantity ?? 0;
+                  const isOutOfStock =
+                    !product.is_available ||
+                    (!product.isAvailable && (product.stock ?? 0) <= 0);
 
                   return (
                     <article
                       key={product.id}
-                      className="flex items-center justify-between gap-3 rounded-xl bg-white p-4 shadow-sm ring-1 ring-orange-100"
+                      className={`flex items-center justify-between gap-3 rounded-xl p-4 shadow-sm ring-1 ${
+                        isOutOfStock
+                          ? "bg-slate-100 ring-slate-200"
+                          : "bg-white ring-orange-100"
+                      }`}
                     >
                       <div className="min-w-0">
-                        <h3 className="truncate text-sm font-semibold text-slate-900">{product.name}</h3>
-                        <p className="mt-1 text-sm font-medium text-orange-600">
+                        <h3 className={`truncate text-sm font-semibold ${isOutOfStock ? "text-slate-500" : "text-slate-900"}`}>
+                          {product.name}
+                        </h3>
+                        <p className={`mt-1 text-sm font-medium ${isOutOfStock ? "text-slate-400" : "text-orange-600"}`}>
                           {rupiahFormatter.format(product.price)}
                         </p>
+                        {isOutOfStock ? (
+                          <p className="mt-1 text-xs font-semibold uppercase tracking-wide text-rose-600">
+                            Habis
+                          </p>
+                        ) : null}
                       </div>
 
                       {quantity === 0 ? (
                         <button
                           type="button"
-                          onClick={() => addToCart(product.id)}
-                          className="inline-flex h-9 w-9 shrink-0 items-center justify-center rounded-full bg-orange-500 text-lg font-bold text-white shadow-sm transition hover:bg-orange-600 active:scale-95"
+                          onClick={() => {
+                            if (isOutOfStock) {
+                              return;
+                            }
+                            addToCart(product.id);
+                          }}
+                          disabled={isOutOfStock}
+                          className={`inline-flex h-9 w-9 shrink-0 items-center justify-center rounded-full text-lg font-bold text-white shadow-sm transition ${
+                            isOutOfStock
+                              ? "cursor-not-allowed bg-slate-400"
+                              : "bg-orange-500 hover:bg-orange-600 active:scale-95"
+                          }`}
                           aria-label={`Add ${product.name} to cart`}
                         >
                           +
@@ -445,8 +501,16 @@ export default function HomePage() {
                           <span className="inline-block min-w-8 px-2 text-center text-sm font-bold">{quantity}</span>
                           <button
                             type="button"
-                            onClick={() => addToCart(product.id)}
-                            className="inline-flex h-7 w-7 items-center justify-center rounded-full bg-orange-500 text-base font-bold text-white shadow-sm"
+                            onClick={() => {
+                              if (isOutOfStock) {
+                                return;
+                              }
+                              addToCart(product.id);
+                            }}
+                            disabled={isOutOfStock}
+                            className={`inline-flex h-7 w-7 items-center justify-center rounded-full text-base font-bold text-white shadow-sm ${
+                              isOutOfStock ? "cursor-not-allowed bg-slate-400" : "bg-orange-500"
+                            }`}
                             aria-label={`Increase ${product.name}`}
                           >
                             +
@@ -522,6 +586,17 @@ export default function HomePage() {
                             <p className="text-xs text-slate-500">{item.quantity} x {rupiahFormatter.format(item.price)}</p>
                           </div>
                           <p className="text-sm font-bold text-slate-900">{rupiahFormatter.format(item.subtotal)}</p>
+                        </div>
+                        <div className="mt-2">
+                          <input
+                            type="text"
+                            value={item.note ?? ""}
+                            onChange={(event) =>
+                              updateItemNote(item.productId, event.target.value)
+                            }
+                            placeholder="Catatan item: Pedas, tanpa bawang..."
+                            className="w-full rounded-lg border border-slate-200 bg-white px-3 py-2 text-xs text-slate-700 outline-none ring-orange-300 placeholder:text-slate-400 focus:ring-2"
+                          />
                         </div>
                       </div>
                     ))}

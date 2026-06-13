@@ -22,7 +22,9 @@ export interface MenuProduct {
   imageUrl?: string | null;
   sku?: string | null;
   price: number;
+  is_available: boolean;
   isAvailable: boolean;
+  stock?: number;
   sortOrder?: number;
 }
 
@@ -56,6 +58,7 @@ export interface OrderItemInput {
   price: number;
   name?: string;
   subtotal?: number;
+  note?: string;
 }
 
 export interface SubmitOrderInput {
@@ -186,6 +189,8 @@ function normalizeProduct(raw: unknown): MenuProduct | null {
     return null;
   }
 
+  const manualAvailabilitySource =
+    data.is_available ?? data.isAvailable ?? data.available;
   const availabilitySource =
     data.isAvailable ?? data.available ?? data.is_active ?? data.isActive;
 
@@ -199,7 +204,10 @@ function normalizeProduct(raw: unknown): MenuProduct | null {
     imageUrl: toNullableString(data.imageUrl) ?? toNullableString(data.image),
     sku: toNullableString(data.sku),
     price: toNumber(data.price, 0),
+    is_available:
+      typeof manualAvailabilitySource === "boolean" ? manualAvailabilitySource : true,
     isAvailable: typeof availabilitySource === "boolean" ? availabilitySource : true,
+    stock: toNumber(data.stock, 0),
     sortOrder: toNumber(data.sortOrder, 0),
   };
 }
@@ -329,6 +337,7 @@ export async function submitOrder({
       price: item.price,
       name: item.name,
       subtotal: item.subtotal ?? item.price * item.quantity,
+      note: item.note?.trim() || undefined,
     })),
     totalAmount,
     notes: notes?.trim() || undefined,
