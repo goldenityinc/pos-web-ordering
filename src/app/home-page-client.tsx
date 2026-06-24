@@ -149,7 +149,7 @@ export default function HomePage() {
     const run = async () => {
       try {
         setQrisLoadError(null);
-        const settings = await getPublicSettings(tenantId);
+        const settings = await getPublicSettings(tenantId, branchId);
         setQrisImageUrl(settings.qrisImageUrl);
       } catch (err) {
         const message =
@@ -160,7 +160,7 @@ export default function HomePage() {
     };
 
     void run();
-  }, [isCheckoutOpen, tenantId]);
+  }, [branchId, isCheckoutOpen, tenantId]);
 
   const productById = useMemo(() => {
     return new Map(products.map((product) => [product.id, product]));

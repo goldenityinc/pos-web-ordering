@@ -405,6 +405,7 @@ export async function submitOrder({
 
 export async function getPublicSettings(
   tenantId: string,
+  branchId?: string,
 ): Promise<PublicSettingsResponse> {
   if (!tenantId) {
     return { qrisImageUrl: null };
@@ -412,6 +413,9 @@ export async function getPublicSettings(
 
   const url = new URL("/api/v1/settings", BRIDGE_API_URL);
   url.searchParams.set("tenantId", tenantId);
+  if (branchId?.trim()) {
+    url.searchParams.set("branchId", branchId.trim());
+  }
 
   const response = await fetch(url.toString(), {
     method: "GET",
