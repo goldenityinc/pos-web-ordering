@@ -70,12 +70,18 @@ export interface SubmitOrderInput {
   cartItems: OrderItemInput[];
   totalAmount: number;
   notes?: string;
+  paymentMethod?: "CASHIER" | "QRIS" | "DIGITAL_PAYMENT";
+  paymentProofFile?: File | null;
 }
 
 export interface SubmitOrderResponse {
   orderId?: string;
   message?: string;
   [key: string]: unknown;
+}
+
+export interface PublicSettingsResponse {
+  qrisImageUrl: string | null;
 }
 
 interface RawApiResponse {
@@ -314,6 +320,8 @@ export async function submitOrder({
   cartItems,
   totalAmount,
   notes,
+  paymentMethod,
+  paymentProofFile,
 }: SubmitOrderInput): Promise<SubmitOrderResponse> {
   if (!tenantId) {
     throw new Error("tenantId is required to submit order.");
@@ -328,6 +336,7 @@ export async function submitOrder({
   }
 
   const url = `${BRIDGE_API_URL}/api/v1/qr-orders`;
+  const normalizedPaymentMethod = (paymentMethod || "CASHIER").toString().trim();
 
   const payload = {
     tenantId,
@@ -346,15 +355,43 @@ export async function submitOrder({
     })),
     totalAmount,
     notes: notes?.trim() || undefined,
+    payment_method: normalizedPaymentMethod,
   };
 
-  const response = await fetch(url, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-    },
-    body: JSON.stringify(payload),
-  });
+  let response: Response;
+  if (paymentProofFile) {
+    const formData = new FormData();
+    formData.append("tenantId", tenantId);
+    formData.append("table", table);
+    if (tableId?.trim()) {
+      formData.append("tableId", tableId.trim());
+      formData.append("table_id", tableId.trim());
+    }
+    if (branchId?.trim()) {
+      formData.append("branchId", branchId.trim());
+      formData.append("branch_id", branchId.trim());
+    }
+    formData.append("items", JSON.stringify(payload.items));
+    formData.append("totalAmount", String(totalAmount));
+    if (notes?.trim()) {
+      formData.append("notes", notes.trim());
+    }
+    formData.append("payment_method", normalizedPaymentMethod);
+    formData.append("payment_proof", paymentProofFile);
+
+    response = await fetch(url, {
+      method: "POST",
+      body: formData,
+    });
+  } else {
+    response = await fetch(url, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify(payload),
+    });
+  }
 
   const json = (await response.json().catch(() => ({}))) as SubmitOrderResponse;
 
@@ -364,4 +401,49 @@ export async function submitOrder({
   }
 
   return json;
+}
+
+export async function getPublicSettings(
+  tenantId: string,
+): Promise<PublicSettingsResponse> {
+  if (!tenantId) {
+    return { qrisImageUrl: null };
+  }
+
+  const url = new URL("/api/v1/settings", BRIDGE_API_URL);
+  url.searchParams.set("tenantId", tenantId);
+
+  const response = await fetch(url.toString(), {
+    method: "GET",
+    headers: {
+      "Content-Type": "application/json",
+    },
+    cache: "no-store",
+  });
+
+  if (!response.ok) {
+    throw new Error(`Failed to fetch settings (${response.status}).`);
+  }
+
+  const json = (await response.json()) as {
+    data?: {
+      config?: {
+        qris_image_url?: unknown;
+      };
+    };
+    config?: {
+      qris_image_url?: unknown;
+    };
+  };
+
+  const fromData = json.data?.config?.qris_image_url;
+  const fromRoot = json.config?.qris_image_url;
+  const qrisImageUrl =
+    (typeof fromData === "string" && fromData.trim()) ||
+    (typeof fromRoot === "string" && fromRoot.trim()) ||
+    null;
+
+  return {
+    qrisImageUrl,
+  };
 }

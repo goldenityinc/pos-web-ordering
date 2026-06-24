@@ -3,6 +3,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { useSearchParams } from "next/navigation";
 import {
+  getPublicSettings,
   getMenu,
   BranchInfo,
   MenuCategory,
@@ -56,7 +57,14 @@ export default function HomePage() {
   const [searchText, setSearchText] = useState("");
   const [activeCategoryId, setActiveCategoryId] = useState<string>("all");
   const [isCheckoutOpen, setIsCheckoutOpen] = useState(false);
+  const [isQrisFlowOpen, setIsQrisFlowOpen] = useState(false);
   const [notes, setNotes] = useState("");
+  const [paymentMethod, setPaymentMethod] = useState<"CASHIER" | "QRIS">("CASHIER");
+  const [qrisImageUrl, setQrisImageUrl] = useState<string | null>(null);
+  const [qrisLoadError, setQrisLoadError] = useState<string | null>(null);
+  const [paymentProofFile, setPaymentProofFile] = useState<File | null>(null);
+  const [paymentProofPreviewUrl, setPaymentProofPreviewUrl] = useState<string>("");
+  const [copySuccess, setCopySuccess] = useState<string>("");
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [submitError, setSubmitError] = useState<string | null>(null);
   const [isOrderSuccess, setIsOrderSuccess] = useState(false);
@@ -118,11 +126,41 @@ export default function HomePage() {
 
   useEffect(() => {
     if (!isCheckoutOpen) {
+      if (paymentProofPreviewUrl) {
+        URL.revokeObjectURL(paymentProofPreviewUrl);
+      }
       setSubmitError(null);
       setIsOrderSuccess(false);
       setNotes("");
+      setPaymentMethod("CASHIER");
+      setIsQrisFlowOpen(false);
+      setQrisLoadError(null);
+      setPaymentProofFile(null);
+      setPaymentProofPreviewUrl("");
+      setCopySuccess("");
     }
-  }, [isCheckoutOpen]);
+  }, [isCheckoutOpen, paymentProofPreviewUrl]);
+
+  useEffect(() => {
+    if (!isCheckoutOpen || !tenantId) {
+      return;
+    }
+
+    const run = async () => {
+      try {
+        setQrisLoadError(null);
+        const settings = await getPublicSettings(tenantId);
+        setQrisImageUrl(settings.qrisImageUrl);
+      } catch (err) {
+        const message =
+          err instanceof Error ? err.message : "Gagal memuat QRIS toko.";
+        setQrisLoadError(message);
+        setQrisImageUrl(null);
+      }
+    };
+
+    void run();
+  }, [isCheckoutOpen, tenantId]);
 
   const productById = useMemo(() => {
     return new Map(products.map((product) => [product.id, product]));
@@ -301,7 +339,10 @@ export default function HomePage() {
     setIsCheckoutOpen(false);
   };
 
-  const handleSubmitOrder = async () => {
+  const handleSubmitOrder = async (
+    selectedPaymentMethod: "CASHIER" | "QRIS",
+    selectedProofFile?: File | null,
+  ) => {
     if (!tenantId) {
       setSubmitError("Tenant tidak ditemukan pada URL.");
       return;
@@ -333,9 +374,12 @@ export default function HomePage() {
         cartItems: payloadItems,
         totalAmount: cartSummary.total,
         notes,
+        paymentMethod: selectedPaymentMethod,
+        paymentProofFile: selectedProofFile || null,
       });
 
       setIsOrderSuccess(true);
+      setIsQrisFlowOpen(false);
       setCart({});
     } catch (err) {
       const message =
@@ -344,6 +388,41 @@ export default function HomePage() {
     } finally {
       setIsSubmitting(false);
     }
+  };
+
+  const handleProofFileChange = (file: File | null) => {
+    if (paymentProofPreviewUrl) {
+      URL.revokeObjectURL(paymentProofPreviewUrl);
+    }
+
+    if (!file) {
+      setPaymentProofFile(null);
+      setPaymentProofPreviewUrl("");
+      return;
+    }
+
+    const previewUrl = URL.createObjectURL(file);
+    setPaymentProofFile(file);
+    setPaymentProofPreviewUrl(previewUrl);
+  };
+
+  const handleCopyGrandTotal = async () => {
+    try {
+      await navigator.clipboard.writeText(String(cartSummary.total));
+      setCopySuccess("Nominal berhasil disalin.");
+    } catch (_) {
+      setCopySuccess("Gagal menyalin nominal.");
+    }
+  };
+
+  const handlePrimaryCheckoutAction = () => {
+    if (paymentMethod === "QRIS") {
+      setIsQrisFlowOpen(true);
+      setSubmitError(null);
+      return;
+    }
+
+    void handleSubmitOrder("CASHIER");
   };
 
   return (
@@ -593,6 +672,105 @@ export default function HomePage() {
               </div>
             ) : (
               <>
+                {isQrisFlowOpen ? (
+                  <div className="flex flex-1 flex-col overflow-y-auto px-4 py-4">
+                    <h3 className="text-xl font-extrabold text-slate-900">Pembayaran QRIS</h3>
+                    <p className="mt-1 text-sm text-slate-500">Ikuti langkah berikut sebelum kirim pesanan.</p>
+
+                    <div className="mt-4 rounded-2xl border border-orange-100 bg-orange-50 p-3">
+                      {qrisImageUrl ? (
+                        <img
+                          src={qrisImageUrl}
+                          alt="QRIS Toko"
+                          className="mx-auto h-72 w-full max-w-sm rounded-xl object-contain bg-white"
+                        />
+                      ) : (
+                        <p className="rounded-xl bg-white px-3 py-4 text-sm text-slate-600">
+                          QRIS statis belum tersedia untuk tenant ini.
+                        </p>
+                      )}
+                      {qrisLoadError ? (
+                        <p className="mt-2 text-xs text-rose-600">{qrisLoadError}</p>
+                      ) : null}
+                    </div>
+
+                    <ol className="mt-4 list-decimal space-y-2 pl-5 text-sm text-slate-700">
+                      <li>Screenshot kode QRIS di atas.</li>
+                      <li>Buka aplikasi M-Banking atau E-Wallet Anda, lalu scan/upload screenshot QRIS.</li>
+                      <li>Masukkan nominal tagihan.</li>
+                      <li>Upload bukti transfer di bawah ini untuk memproses pesanan.</li>
+                    </ol>
+
+                    <div className="mt-4 rounded-xl border border-slate-100 bg-white p-3">
+                      <div className="flex items-center justify-between gap-3">
+                        <span className="text-sm text-slate-500">Grand Total</span>
+                        <div className="flex items-center gap-2">
+                          <span className="text-lg font-extrabold text-orange-600">
+                            {rupiahFormatter.format(cartSummary.total)}
+                          </span>
+                          <button
+                            type="button"
+                            onClick={() => void handleCopyGrandTotal()}
+                            className="rounded-lg border border-slate-200 px-2 py-1 text-xs font-semibold text-slate-700"
+                          >
+                            Copy
+                          </button>
+                        </div>
+                      </div>
+                      {copySuccess ? (
+                        <p className="mt-2 text-xs text-emerald-700">{copySuccess}</p>
+                      ) : null}
+                    </div>
+
+                    <div className="mt-4 rounded-xl border border-slate-100 bg-white p-3">
+                      <label className="text-sm font-semibold text-slate-800" htmlFor="payment-proof-upload">
+                        Upload Bukti Transfer
+                      </label>
+                      <input
+                        id="payment-proof-upload"
+                        type="file"
+                        accept="image/*"
+                        onChange={(event) =>
+                          handleProofFileChange(event.target.files?.[0] ?? null)
+                        }
+                        className="mt-2 block w-full rounded-lg border border-slate-200 p-2 text-sm"
+                      />
+                      {paymentProofPreviewUrl ? (
+                        <img
+                          src={paymentProofPreviewUrl}
+                          alt="Preview bukti transfer"
+                          className="mt-3 h-56 w-full rounded-lg object-cover"
+                        />
+                      ) : null}
+                    </div>
+
+                    {submitError ? (
+                      <p className="mt-3 rounded-lg border border-rose-200 bg-rose-50 px-3 py-2 text-sm text-rose-700">
+                        {submitError}
+                      </p>
+                    ) : null}
+
+                    <div className="mt-4 grid grid-cols-2 gap-2">
+                      <button
+                        type="button"
+                        onClick={() => setIsQrisFlowOpen(false)}
+                        disabled={isSubmitting}
+                        className="rounded-xl border border-slate-200 bg-white px-4 py-3 text-sm font-semibold text-slate-700"
+                      >
+                        Kembali
+                      </button>
+                      <button
+                        type="button"
+                        disabled={isSubmitting || !paymentProofFile}
+                        onClick={() => void handleSubmitOrder("QRIS", paymentProofFile)}
+                        className="rounded-xl bg-orange-500 px-4 py-3 text-sm font-bold text-white shadow-sm transition hover:bg-orange-600 disabled:cursor-not-allowed disabled:opacity-70"
+                      >
+                        {isSubmitting ? "Mengirim pesanan..." : "Pesan Sekarang"}
+                      </button>
+                    </div>
+                  </div>
+                ) : (
+                  <>
                 <div className="flex-1 overflow-y-auto px-4 py-4">
                   <div className="space-y-3">
                     {cartItems.map((item) => (
@@ -633,12 +811,37 @@ export default function HomePage() {
                   </div>
 
                   <div className="mt-4 rounded-xl border border-slate-100 p-3">
-                    <div className="mb-3 rounded-lg border border-amber-100 bg-amber-50 px-3 py-2 text-sm text-amber-900">
-                      Pembayaran dilakukan di kasir. Pesanan ini belum terhubung ke payment gateway.
-                    </div>
                     <div className="flex items-center justify-between text-sm">
                       <span className="text-slate-500">Metode Pembayaran</span>
-                      <span className="font-semibold text-slate-900">Bayar di Kasir</span>
+                      <div className="flex gap-2">
+                        <button
+                          type="button"
+                          onClick={() => setPaymentMethod("CASHIER")}
+                          className={`rounded-full px-3 py-1 text-xs font-semibold ${
+                            paymentMethod === "CASHIER"
+                              ? "bg-slate-900 text-white"
+                              : "bg-slate-100 text-slate-700"
+                          }`}
+                        >
+                          Bayar di Kasir
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => setPaymentMethod("QRIS")}
+                          className={`rounded-full px-3 py-1 text-xs font-semibold ${
+                            paymentMethod === "QRIS"
+                              ? "bg-emerald-600 text-white"
+                              : "bg-slate-100 text-slate-700"
+                          }`}
+                        >
+                          QRIS
+                        </button>
+                      </div>
+                    </div>
+                    <div className="mb-3 mt-3 rounded-lg border border-amber-100 bg-amber-50 px-3 py-2 text-sm text-amber-900">
+                      {paymentMethod === "QRIS"
+                        ? "Lanjutkan ke halaman QRIS untuk upload bukti transfer sebelum pesanan dikirim."
+                        : "Pembayaran dilakukan di kasir. Pesanan ini belum terhubung ke payment gateway."}
                     </div>
                     <div className="mt-2 flex items-center justify-between text-sm">
                       <span className="text-slate-500">Subtotal</span>
@@ -661,14 +864,18 @@ export default function HomePage() {
                   <button
                     type="button"
                     disabled={isSubmitting || cartItems.length === 0}
-                    onClick={() => void handleSubmitOrder()}
+                    onClick={handlePrimaryCheckoutAction}
                     className="w-full rounded-xl bg-orange-500 px-4 py-4 text-sm font-bold text-white shadow-sm transition hover:bg-orange-600 disabled:cursor-not-allowed disabled:opacity-70"
                   >
                     {isSubmitting
                       ? "Mengirim pesanan..."
+                      : paymentMethod === "QRIS"
+                      ? "Lanjut Bayar QRIS"
                       : `Pesan ke Kasir (${rupiahFormatter.format(cartSummary.total)})`}
                   </button>
                 </div>
+                  </>
+                )}
               </>
             )}
           </div>
