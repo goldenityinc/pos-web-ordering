@@ -202,11 +202,9 @@ export default function HomePage() {
   const visibleCategoryChips = useMemo(() => {
     return [
       { id: "all", name: "Semua" },
-      ...categories.filter((category) =>
-        groupedSections.some((section) => section.id === category.id),
-      ),
+      ...categories,
     ];
-  }, [categories, groupedSections]);
+  }, [categories]);
 
   const cartItems = useMemo(() => {
     const rows: Array<{
