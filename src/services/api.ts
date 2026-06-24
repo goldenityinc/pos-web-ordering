@@ -77,6 +77,11 @@ export interface SubmitOrderInput {
 export interface SubmitOrderResponse {
   orderId?: string;
   message?: string;
+  data?: Record<string, unknown>;
+  receipt_number?: string;
+  receiptNumber?: string;
+  receipt_url?: string;
+  receiptUrl?: string;
   [key: string]: unknown;
 }
 

@@ -32,6 +32,30 @@ type GroupedMenuSection = {
   items: MenuProduct[];
 };
 
+type OnlineReceiptItem = {
+  name: string;
+  quantity: number;
+  price: number;
+  subtotal: number;
+  note?: string;
+};
+
+type OnlineReceiptSnapshot = {
+  orderId: string;
+  receiptNumber: string;
+  createdAt: string;
+  customerName: string;
+  tenantName: string;
+  tableNumber: string;
+  branchName: string;
+  paymentMethod: string;
+  totalAmount: number;
+  items: OnlineReceiptItem[];
+  orderNote?: string;
+  paymentProofUrl?: string;
+  receiptUrl?: string;
+};
+
 export default function HomePage() {
   const searchParams = useSearchParams();
 
@@ -68,6 +92,7 @@ export default function HomePage() {
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [submitError, setSubmitError] = useState<string | null>(null);
   const [isOrderSuccess, setIsOrderSuccess] = useState(false);
+  const [orderReceipt, setOrderReceipt] = useState<OnlineReceiptSnapshot | null>(null);
 
   useEffect(() => {
     if (!tenantId) {
@@ -138,6 +163,7 @@ export default function HomePage() {
       setPaymentProofFile(null);
       setPaymentProofPreviewUrl("");
       setCopySuccess("");
+      setOrderReceipt(null);
     }
   }, [isCheckoutOpen, paymentProofPreviewUrl]);
 
@@ -366,7 +392,7 @@ export default function HomePage() {
         note: item.note,
       }));
 
-      await submitOrder({
+      const response = await submitOrder({
         tenantId,
         table: tableNumber,
         tableId,
@@ -376,6 +402,51 @@ export default function HomePage() {
         notes,
         paymentMethod: selectedPaymentMethod,
         paymentProofFile: selectedProofFile || null,
+      });
+
+      const responseData =
+        response && typeof response === "object" && response.data && typeof response.data === "object"
+          ? (response.data as Record<string, unknown>)
+          : (response as unknown as Record<string, unknown>);
+
+      const receiptNumber =
+        String(
+          responseData.receipt_number ??
+            responseData.receiptNumber ??
+            responseData.invoice_number ??
+            responseData.invoiceNumber ??
+            "",
+        ).trim();
+
+      const responseOrderId = String(
+        responseData.id ?? responseData.orderId ?? responseData.order_id ?? response.orderId ?? "",
+      ).trim();
+
+      const paymentMethodLabel =
+        selectedPaymentMethod === "QRIS" ? "QRIS" : "Bayar di Kasir";
+
+      setOrderReceipt({
+        orderId: responseOrderId,
+        receiptNumber,
+        createdAt: new Date().toISOString(),
+        customerName: "Guest",
+        tenantName: tenantName || "Customer Ordering",
+        tableNumber,
+        branchName: branchInfo?.name || branchNameFromUrl || "-",
+        paymentMethod: paymentMethodLabel,
+        totalAmount: cartSummary.total,
+        items: cartItems.map((item) => ({
+          name: item.name,
+          quantity: item.quantity,
+          price: item.price,
+          subtotal: item.subtotal,
+          note: item.note,
+        })),
+        orderNote: notes.trim() || undefined,
+        paymentProofUrl: String(
+          responseData.payment_proof_url ?? responseData.paymentProofUrl ?? "",
+        ).trim() || undefined,
+        receiptUrl: String(responseData.receipt_url ?? responseData.receiptUrl ?? "").trim() || undefined,
       });
 
       setIsOrderSuccess(true);
@@ -423,6 +494,58 @@ export default function HomePage() {
     }
 
     void handleSubmitOrder("CASHIER");
+  };
+
+  const handleDownloadOnlineReceipt = () => {
+    if (!orderReceipt) {
+      return;
+    }
+
+    const createdAt = new Date(orderReceipt.createdAt);
+    const printableDate = Number.isNaN(createdAt.getTime())
+      ? orderReceipt.createdAt
+      : createdAt.toLocaleString("id-ID");
+
+    const lines = [
+      "=== STRUK ORDER ONLINE ===",
+      `Toko: ${orderReceipt.tenantName}`,
+      `Cabang: ${orderReceipt.branchName}`,
+      `Meja: ${orderReceipt.tableNumber}`,
+      `Waktu: ${printableDate}`,
+      `No. Struk: ${orderReceipt.receiptNumber || "-"}`,
+      `Order ID: ${orderReceipt.orderId || "-"}`,
+      `Metode Bayar: ${orderReceipt.paymentMethod}`,
+      "",
+      "Item:",
+      ...orderReceipt.items.map(
+        (item) =>
+          `- ${item.quantity} x ${item.name} @ ${rupiahFormatter.format(item.price)} = ${rupiahFormatter.format(item.subtotal)}${
+            item.note?.trim() ? ` (Catatan: ${item.note.trim()})` : ""
+          }`,
+      ),
+      "",
+      `Total: ${rupiahFormatter.format(orderReceipt.totalAmount)}`,
+      orderReceipt.orderNote ? `Catatan Pesanan: ${orderReceipt.orderNote}` : "",
+      orderReceipt.paymentProofUrl ? `Bukti Transfer: ${orderReceipt.paymentProofUrl}` : "",
+      orderReceipt.receiptUrl ? `Struk URL: ${orderReceipt.receiptUrl}` : "",
+      "",
+      "Terima kasih telah memesan.",
+    ].filter((line) => line.length > 0);
+
+    const fileName =
+      (orderReceipt.receiptNumber || orderReceipt.orderId || `order-${Date.now()}`)
+        .replace(/[^a-zA-Z0-9-_]/g, "_") +
+      ".txt";
+
+    const blob = new Blob([lines.join("\n")], { type: "text/plain;charset=utf-8" });
+    const url = URL.createObjectURL(blob);
+    const anchor = document.createElement("a");
+    anchor.href = url;
+    anchor.download = fileName;
+    document.body.appendChild(anchor);
+    anchor.click();
+    document.body.removeChild(anchor);
+    URL.revokeObjectURL(url);
   };
 
   return (
@@ -662,6 +785,21 @@ export default function HomePage() {
                 <p className="mt-2 text-sm text-slate-600">
                   Terima kasih, pesanan Anda sudah masuk ke kasir dan dapur.
                 </p>
+                {orderReceipt ? (
+                  <div className="mt-4 w-full rounded-xl border border-emerald-100 bg-emerald-50 px-4 py-3 text-left text-xs text-emerald-900">
+                    <p>No. Struk: <strong>{orderReceipt.receiptNumber || "-"}</strong></p>
+                    <p>Order ID: <strong>{orderReceipt.orderId || "-"}</strong></p>
+                    <p>Total: <strong>{rupiahFormatter.format(orderReceipt.totalAmount)}</strong></p>
+                  </div>
+                ) : null}
+                <button
+                  type="button"
+                  onClick={handleDownloadOnlineReceipt}
+                  disabled={!orderReceipt}
+                  className="mt-4 rounded-xl border border-slate-200 bg-white px-5 py-3 text-sm font-semibold text-slate-800 disabled:cursor-not-allowed disabled:opacity-60"
+                >
+                  Download Struk Online
+                </button>
                 <button
                   type="button"
                   onClick={handleCloseCheckout}
