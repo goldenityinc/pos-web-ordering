@@ -82,6 +82,7 @@ export default function HomePage() {
   const [activeCategoryId, setActiveCategoryId] = useState<string>("all");
   const [isCheckoutOpen, setIsCheckoutOpen] = useState(false);
   const [isQrisFlowOpen, setIsQrisFlowOpen] = useState(false);
+  const [isQrisPreviewOpen, setIsQrisPreviewOpen] = useState(false);
   const [notes, setNotes] = useState("");
   const [paymentMethod, setPaymentMethod] = useState<"CASHIER" | "QRIS">("CASHIER");
   const [qrisImageUrl, setQrisImageUrl] = useState<string | null>(null);
@@ -164,6 +165,7 @@ export default function HomePage() {
       setPaymentProofPreviewUrl("");
       setCopySuccess("");
       setOrderReceipt(null);
+      setIsQrisPreviewOpen(false);
     }
   }, [isCheckoutOpen, paymentProofPreviewUrl]);
 
@@ -496,6 +498,14 @@ export default function HomePage() {
     void handleSubmitOrder("CASHIER");
   };
 
+  const openQrisPreview = () => {
+    if (!qrisImageUrl) {
+      return;
+    }
+
+    setIsQrisPreviewOpen(true);
+  };
+
   const handleDownloadOnlineReceipt = () => {
     if (!orderReceipt) {
       return;
@@ -817,11 +827,21 @@ export default function HomePage() {
 
                     <div className="mt-4 rounded-2xl border border-orange-100 bg-orange-50 p-3">
                       {qrisImageUrl ? (
-                        <img
-                          src={qrisImageUrl}
-                          alt="QRIS Toko"
-                          className="mx-auto h-72 w-full max-w-sm rounded-xl object-contain bg-white"
-                        />
+                        <button
+                          type="button"
+                          onClick={openQrisPreview}
+                          className="block w-full overflow-hidden rounded-xl bg-white p-2 shadow-sm transition hover:scale-[1.01] active:scale-[0.99]"
+                          aria-label="Lihat QRIS ukuran penuh"
+                        >
+                          <img
+                            src={qrisImageUrl}
+                            alt="QRIS Toko"
+                            className="mx-auto h-72 w-full max-w-sm rounded-lg object-contain bg-white"
+                          />
+                          <span className="mt-2 block text-center text-xs font-semibold text-orange-700">
+                            Ketuk untuk perbesar
+                          </span>
+                        </button>
                       ) : (
                         <p className="rounded-xl bg-white px-3 py-4 text-sm text-slate-600">
                           QRIS statis belum tersedia untuk tenant ini.
@@ -1016,6 +1036,26 @@ export default function HomePage() {
                 )}
               </>
             )}
+          </div>
+        </div>
+      ) : null}
+
+      {isQrisPreviewOpen && qrisImageUrl ? (
+        <div className="fixed inset-0 z-[60] flex items-center justify-center bg-black/85 p-4">
+          <div className="relative flex h-[92vh] w-full max-w-5xl items-center justify-center overflow-hidden rounded-3xl bg-slate-950 shadow-2xl ring-1 ring-white/10">
+            <button
+              type="button"
+              onClick={() => setIsQrisPreviewOpen(false)}
+              className="absolute right-4 top-4 z-10 rounded-full bg-white/90 px-3 py-2 text-sm font-semibold text-slate-900 shadow-lg transition hover:bg-white"
+              aria-label="Tutup preview QRIS"
+            >
+              Tutup
+            </button>
+            <img
+              src={qrisImageUrl}
+              alt="QRIS Toko ukuran penuh"
+              className="max-h-full max-w-full object-contain"
+            />
           </div>
         </div>
       ) : null}
