@@ -89,7 +89,7 @@ export interface SubmitOrderResponse {
 export interface PublicSettingsResponse {
   qrisImageUrl: string | null;
   allowPayAtCashier: boolean;
-  enableQrisOcr: boolean;
+  isPaymentProofMandatory: boolean;
 }
 
 interface RawApiResponse {
@@ -423,7 +423,11 @@ export async function getPublicSettings(
   branchId?: string,
 ): Promise<PublicSettingsResponse> {
   if (!tenantId) {
-    return { qrisImageUrl: null, allowPayAtCashier: true, enableQrisOcr: true };
+    return {
+      qrisImageUrl: null,
+      allowPayAtCashier: true,
+      isPaymentProofMandatory: true,
+    };
   }
 
   const url = new URL("/api/v1/settings", BRIDGE_API_URL);
@@ -449,12 +453,14 @@ export async function getPublicSettings(
       config?: {
         qris_image_url?: unknown;
         allow_pay_at_cashier?: unknown;
+        is_payment_proof_mandatory?: unknown;
         enable_qris_ocr?: unknown;
       };
     };
     config?: {
       qris_image_url?: unknown;
       allow_pay_at_cashier?: unknown;
+      is_payment_proof_mandatory?: unknown;
       enable_qris_ocr?: unknown;
     };
   };
@@ -467,6 +473,8 @@ export async function getPublicSettings(
     null;
   const allowFromData = json.data?.config?.allow_pay_at_cashier;
   const allowFromRoot = json.config?.allow_pay_at_cashier;
+  const mandatoryFromData = json.data?.config?.is_payment_proof_mandatory;
+  const mandatoryFromRoot = json.config?.is_payment_proof_mandatory;
   const ocrFromData = json.data?.config?.enable_qris_ocr;
   const ocrFromRoot = json.config?.enable_qris_ocr;
 
@@ -478,8 +486,12 @@ export async function getPublicSettings(
         : typeof allowFromRoot === "boolean"
         ? allowFromRoot
         : true,
-    enableQrisOcr:
-      typeof ocrFromData === "boolean"
+    isPaymentProofMandatory:
+      typeof mandatoryFromData === "boolean"
+        ? mandatoryFromData
+        : typeof mandatoryFromRoot === "boolean"
+        ? mandatoryFromRoot
+        : typeof ocrFromData === "boolean"
         ? ocrFromData
         : typeof ocrFromRoot === "boolean"
         ? ocrFromRoot

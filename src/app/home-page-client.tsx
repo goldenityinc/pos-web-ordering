@@ -86,7 +86,7 @@ export default function HomePage() {
   const [customerNameInput, setCustomerNameInput] = useState("");
   const [paymentMethod, setPaymentMethod] = useState<"CASHIER" | "QRIS">("CASHIER");
   const [allowPayAtCashier, setAllowPayAtCashier] = useState(true);
-  const [enableQrisOcr, setEnableQrisOcr] = useState(true);
+  const [isPaymentProofMandatory, setIsPaymentProofMandatory] = useState(true);
   const [qrisImageUrl, setQrisImageUrl] = useState<string | null>(null);
   const [qrisLoadError, setQrisLoadError] = useState<string | null>(null);
   const [paymentProofFile, setPaymentProofFile] = useState<File | null>(null);
@@ -182,7 +182,7 @@ export default function HomePage() {
         const settings = await getPublicSettings(tenantId, branchId);
         setQrisImageUrl(settings.qrisImageUrl);
         setAllowPayAtCashier(settings.allowPayAtCashier !== false);
-        setEnableQrisOcr(settings.enableQrisOcr !== false);
+        setIsPaymentProofMandatory(settings.isPaymentProofMandatory !== false);
         if (settings.allowPayAtCashier === false) {
           setPaymentMethod("QRIS");
         }
@@ -192,7 +192,7 @@ export default function HomePage() {
         setQrisLoadError(message);
         setQrisImageUrl(null);
         setAllowPayAtCashier(true);
-        setEnableQrisOcr(true);
+        setIsPaymentProofMandatory(true);
       }
     };
 
@@ -497,6 +497,13 @@ export default function HomePage() {
   };
 
   const handlePrimaryCheckoutAction = () => {
+    if (!allowPayAtCashier) {
+      setPaymentMethod("QRIS");
+      setIsQrisFlowOpen(true);
+      setSubmitError(null);
+      return;
+    }
+
     if (paymentMethod === "QRIS") {
       setIsQrisFlowOpen(true);
       setSubmitError(null);
@@ -890,7 +897,9 @@ export default function HomePage() {
 
                     <div className="mt-4 rounded-xl border border-slate-100 bg-white p-3">
                       <label className="text-sm font-semibold text-slate-800" htmlFor="payment-proof-upload">
-                        {enableQrisOcr ? "Upload Bukti Transfer" : "Upload Bukti Transfer (Opsional)"}
+                        {isPaymentProofMandatory
+                          ? "Upload Bukti Transfer (Wajib)"
+                          : "Upload Bukti Transfer (Opsional)"}
                       </label>
                       <input
                         id="payment-proof-upload"
@@ -927,7 +936,7 @@ export default function HomePage() {
                       </button>
                       <button
                         type="button"
-                        disabled={isSubmitting || (enableQrisOcr && !paymentProofFile)}
+                        disabled={isSubmitting || (isPaymentProofMandatory && !paymentProofFile)}
                         onClick={() => void handleSubmitOrder("QRIS", paymentProofFile)}
                         className="rounded-xl bg-orange-500 px-4 py-3 text-sm font-bold text-white shadow-sm transition hover:bg-orange-600 disabled:cursor-not-allowed disabled:opacity-70"
                       >
