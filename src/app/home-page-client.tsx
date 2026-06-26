@@ -83,8 +83,10 @@ export default function HomePage() {
   const [isCheckoutOpen, setIsCheckoutOpen] = useState(false);
   const [isQrisFlowOpen, setIsQrisFlowOpen] = useState(false);
   const [isQrisPreviewOpen, setIsQrisPreviewOpen] = useState(false);
-  const [notes, setNotes] = useState("");
+  const [customerNameInput, setCustomerNameInput] = useState("");
   const [paymentMethod, setPaymentMethod] = useState<"CASHIER" | "QRIS">("CASHIER");
+  const [allowPayAtCashier, setAllowPayAtCashier] = useState(true);
+  const [enableQrisOcr, setEnableQrisOcr] = useState(true);
   const [qrisImageUrl, setQrisImageUrl] = useState<string | null>(null);
   const [qrisLoadError, setQrisLoadError] = useState<string | null>(null);
   const [paymentProofFile, setPaymentProofFile] = useState<File | null>(null);
@@ -157,8 +159,8 @@ export default function HomePage() {
       }
       setSubmitError(null);
       setIsOrderSuccess(false);
-      setNotes("");
-      setPaymentMethod("CASHIER");
+      setCustomerNameInput("");
+      setPaymentMethod(allowPayAtCashier ? "CASHIER" : "QRIS");
       setIsQrisFlowOpen(false);
       setQrisLoadError(null);
       setPaymentProofFile(null);
@@ -167,7 +169,7 @@ export default function HomePage() {
       setOrderReceipt(null);
       setIsQrisPreviewOpen(false);
     }
-  }, [isCheckoutOpen, paymentProofPreviewUrl]);
+  }, [allowPayAtCashier, isCheckoutOpen, paymentProofPreviewUrl]);
 
   useEffect(() => {
     if (!isCheckoutOpen || !tenantId) {
@@ -179,11 +181,18 @@ export default function HomePage() {
         setQrisLoadError(null);
         const settings = await getPublicSettings(tenantId, branchId);
         setQrisImageUrl(settings.qrisImageUrl);
+        setAllowPayAtCashier(settings.allowPayAtCashier !== false);
+        setEnableQrisOcr(settings.enableQrisOcr !== false);
+        if (settings.allowPayAtCashier === false) {
+          setPaymentMethod("QRIS");
+        }
       } catch (err) {
         const message =
           err instanceof Error ? err.message : "Gagal memuat QRIS toko.";
         setQrisLoadError(message);
         setQrisImageUrl(null);
+        setAllowPayAtCashier(true);
+        setEnableQrisOcr(true);
       }
     };
 
@@ -401,7 +410,7 @@ export default function HomePage() {
         branchId,
         cartItems: payloadItems,
         totalAmount: cartSummary.total,
-        notes,
+        customerName: customerNameInput,
         paymentMethod: selectedPaymentMethod,
         paymentProofFile: selectedProofFile || null,
       });
@@ -431,7 +440,7 @@ export default function HomePage() {
         orderId: responseOrderId,
         receiptNumber,
         createdAt: new Date().toISOString(),
-        customerName: "Guest",
+        customerName: customerNameInput.trim() || "Guest",
         tenantName: tenantName || "Customer Ordering",
         tableNumber,
         branchName: branchInfo?.name || branchNameFromUrl || "-",
@@ -444,7 +453,6 @@ export default function HomePage() {
           subtotal: item.subtotal,
           note: item.note,
         })),
-        orderNote: notes.trim() || undefined,
         paymentProofUrl: String(
           responseData.payment_proof_url ?? responseData.paymentProofUrl ?? "",
         ).trim() || undefined,
@@ -882,7 +890,7 @@ export default function HomePage() {
 
                     <div className="mt-4 rounded-xl border border-slate-100 bg-white p-3">
                       <label className="text-sm font-semibold text-slate-800" htmlFor="payment-proof-upload">
-                        Upload Bukti Transfer
+                        {enableQrisOcr ? "Upload Bukti Transfer" : "Upload Bukti Transfer (Opsional)"}
                       </label>
                       <input
                         id="payment-proof-upload"
@@ -919,7 +927,7 @@ export default function HomePage() {
                       </button>
                       <button
                         type="button"
-                        disabled={isSubmitting || !paymentProofFile}
+                        disabled={isSubmitting || (enableQrisOcr && !paymentProofFile)}
                         onClick={() => void handleSubmitOrder("QRIS", paymentProofFile)}
                         className="rounded-xl bg-orange-500 px-4 py-3 text-sm font-bold text-white shadow-sm transition hover:bg-orange-600 disabled:cursor-not-allowed disabled:opacity-70"
                       >
@@ -959,12 +967,13 @@ export default function HomePage() {
                   </div>
 
                   <div className="mt-4 rounded-xl border border-orange-100 bg-orange-50 p-3">
-                    <p className="text-xs font-semibold uppercase tracking-wide text-orange-700">Catatan Khusus</p>
-                    <textarea
-                      value={notes}
-                      onChange={(event) => setNotes(event.target.value)}
-                      placeholder="Contoh: tanpa sambal, es dipisah"
-                      className="mt-2 h-24 w-full resize-none rounded-lg border border-orange-200 bg-white px-3 py-2 text-sm text-slate-700 outline-none ring-orange-300 focus:ring-2"
+                    <p className="text-xs font-semibold uppercase tracking-wide text-orange-700">Nama Pelanggan</p>
+                    <input
+                      type="text"
+                      value={customerNameInput}
+                      onChange={(event) => setCustomerNameInput(event.target.value)}
+                      placeholder="Masukkan nama Anda (Contoh: Andre, Meja 1)"
+                      className="mt-2 w-full rounded-lg border border-orange-200 bg-white px-3 py-2 text-sm text-slate-700 outline-none ring-orange-300 focus:ring-2"
                     />
                   </div>
 
@@ -972,17 +981,19 @@ export default function HomePage() {
                     <div className="flex items-center justify-between text-sm">
                       <span className="text-slate-500">Metode Pembayaran</span>
                       <div className="flex gap-2">
-                        <button
-                          type="button"
-                          onClick={() => setPaymentMethod("CASHIER")}
-                          className={`rounded-full px-3 py-1 text-xs font-semibold ${
-                            paymentMethod === "CASHIER"
-                              ? "bg-slate-900 text-white"
-                              : "bg-slate-100 text-slate-700"
-                          }`}
-                        >
-                          Bayar di Kasir
-                        </button>
+                        {allowPayAtCashier ? (
+                          <button
+                            type="button"
+                            onClick={() => setPaymentMethod("CASHIER")}
+                            className={`rounded-full px-3 py-1 text-xs font-semibold ${
+                              paymentMethod === "CASHIER"
+                                ? "bg-slate-900 text-white"
+                                : "bg-slate-100 text-slate-700"
+                            }`}
+                          >
+                            Bayar di Kasir
+                          </button>
+                        ) : null}
                         <button
                           type="button"
                           onClick={() => setPaymentMethod("QRIS")}
@@ -999,7 +1010,9 @@ export default function HomePage() {
                     <div className="mb-3 mt-3 rounded-lg border border-amber-100 bg-amber-50 px-3 py-2 text-sm text-amber-900">
                       {paymentMethod === "QRIS"
                         ? "Lanjutkan ke halaman QRIS untuk upload bukti transfer sebelum pesanan dikirim."
-                        : "Pembayaran dilakukan di kasir. Pesanan ini belum terhubung ke payment gateway."}
+                        : allowPayAtCashier
+                        ? "Pembayaran dilakukan di kasir. Pesanan ini belum terhubung ke payment gateway."
+                        : "Pembayaran di kasir sedang dinonaktifkan oleh toko. Gunakan QRIS."}
                     </div>
                     <div className="mt-2 flex items-center justify-between text-sm">
                       <span className="text-slate-500">Subtotal</span>
@@ -1027,7 +1040,7 @@ export default function HomePage() {
                   >
                     {isSubmitting
                       ? "Mengirim pesanan..."
-                      : paymentMethod === "QRIS"
+                      : paymentMethod === "QRIS" || !allowPayAtCashier
                       ? "Lanjut Bayar QRIS"
                       : `Pesan ke Kasir (${rupiahFormatter.format(cartSummary.total)})`}
                   </button>

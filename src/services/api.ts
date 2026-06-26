@@ -69,6 +69,7 @@ export interface SubmitOrderInput {
   branchId?: string;
   cartItems: OrderItemInput[];
   totalAmount: number;
+  customerName?: string;
   notes?: string;
   paymentMethod?: "CASHIER" | "QRIS" | "DIGITAL_PAYMENT";
   paymentProofFile?: File | null;
@@ -87,6 +88,8 @@ export interface SubmitOrderResponse {
 
 export interface PublicSettingsResponse {
   qrisImageUrl: string | null;
+  allowPayAtCashier: boolean;
+  enableQrisOcr: boolean;
 }
 
 interface RawApiResponse {
@@ -324,6 +327,7 @@ export async function submitOrder({
   branchId,
   cartItems,
   totalAmount,
+  customerName,
   notes,
   paymentMethod,
   paymentProofFile,
@@ -350,6 +354,8 @@ export async function submitOrder({
     table_id: tableId,
     branchId: branchId?.trim() || undefined,
     branch_id: branchId?.trim() || undefined,
+    customerName: customerName?.trim() || undefined,
+    customer_name: customerName?.trim() || undefined,
     items: cartItems.map((item) => ({
       productId: item.productId,
       quantity: item.quantity,
@@ -375,6 +381,10 @@ export async function submitOrder({
     if (branchId?.trim()) {
       formData.append("branchId", branchId.trim());
       formData.append("branch_id", branchId.trim());
+    }
+    if (customerName?.trim()) {
+      formData.append("customerName", customerName.trim());
+      formData.append("customer_name", customerName.trim());
     }
     formData.append("items", JSON.stringify(payload.items));
     formData.append("totalAmount", String(totalAmount));
@@ -413,7 +423,7 @@ export async function getPublicSettings(
   branchId?: string,
 ): Promise<PublicSettingsResponse> {
   if (!tenantId) {
-    return { qrisImageUrl: null };
+    return { qrisImageUrl: null, allowPayAtCashier: true, enableQrisOcr: true };
   }
 
   const url = new URL("/api/v1/settings", BRIDGE_API_URL);
@@ -438,10 +448,14 @@ export async function getPublicSettings(
     data?: {
       config?: {
         qris_image_url?: unknown;
+        allow_pay_at_cashier?: unknown;
+        enable_qris_ocr?: unknown;
       };
     };
     config?: {
       qris_image_url?: unknown;
+      allow_pay_at_cashier?: unknown;
+      enable_qris_ocr?: unknown;
     };
   };
 
@@ -451,8 +465,24 @@ export async function getPublicSettings(
     (typeof fromData === "string" && fromData.trim()) ||
     (typeof fromRoot === "string" && fromRoot.trim()) ||
     null;
+  const allowFromData = json.data?.config?.allow_pay_at_cashier;
+  const allowFromRoot = json.config?.allow_pay_at_cashier;
+  const ocrFromData = json.data?.config?.enable_qris_ocr;
+  const ocrFromRoot = json.config?.enable_qris_ocr;
 
   return {
     qrisImageUrl,
+    allowPayAtCashier:
+      typeof allowFromData === "boolean"
+        ? allowFromData
+        : typeof allowFromRoot === "boolean"
+        ? allowFromRoot
+        : true,
+    enableQrisOcr:
+      typeof ocrFromData === "boolean"
+        ? ocrFromData
+        : typeof ocrFromRoot === "boolean"
+        ? ocrFromRoot
+        : true,
   };
 }
