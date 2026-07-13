@@ -73,6 +73,13 @@ export interface SubmitOrderInput {
   notes?: string;
   paymentMethod?: "CASHIER" | "QRIS" | "DIGITAL_PAYMENT";
   paymentProofFile?: File | null;
+  paymentReceipt?:
+    | string
+    | {
+        secure_url?: unknown;
+        public_id?: unknown;
+      }
+    | null;
 }
 
 export interface SubmitOrderResponse {
@@ -157,6 +164,27 @@ function toNullableString(value: unknown): string | null | undefined {
   }
 
   return toStringOrUndefined(value);
+}
+
+function resolvePaymentReceiptUrl(
+  value:
+    | string
+    | {
+        secure_url?: unknown;
+        public_id?: unknown;
+      }
+    | null
+    | undefined,
+): string | undefined {
+  if (typeof value === "string") {
+    return value.trim() || undefined;
+  }
+
+  if (value && typeof value === "object") {
+    return toStringOrUndefined(value.secure_url);
+  }
+
+  return undefined;
 }
 
 function normalizeCategory(raw: unknown): MenuCategory | null {
@@ -331,6 +359,7 @@ export async function submitOrder({
   notes,
   paymentMethod,
   paymentProofFile,
+  paymentReceipt,
 }: SubmitOrderInput): Promise<SubmitOrderResponse> {
   if (!tenantId) {
     throw new Error("tenantId is required to submit order.");
@@ -346,6 +375,7 @@ export async function submitOrder({
 
   const url = `${BRIDGE_API_URL}/api/v1/qr-orders`;
   const normalizedPaymentMethod = (paymentMethod || "CASHIER").toString().trim();
+  const paymentReceiptUrl = resolvePaymentReceiptUrl(paymentReceipt);
 
   const payload = {
     tenantId,
@@ -367,6 +397,8 @@ export async function submitOrder({
     totalAmount,
     notes: notes?.trim() || undefined,
     payment_method: normalizedPaymentMethod,
+    paymentReceipt: paymentReceiptUrl,
+    payment_receipt: paymentReceiptUrl,
   };
 
   let response: Response;
@@ -392,6 +424,10 @@ export async function submitOrder({
       formData.append("notes", notes.trim());
     }
     formData.append("payment_method", normalizedPaymentMethod);
+    if (paymentReceiptUrl) {
+      formData.append("paymentReceipt", paymentReceiptUrl);
+      formData.append("payment_receipt", paymentReceiptUrl);
+    }
     formData.append("payment_proof", paymentProofFile);
 
     response = await fetch(url, {

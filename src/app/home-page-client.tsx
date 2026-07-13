@@ -56,6 +56,19 @@ type OnlineReceiptSnapshot = {
   receiptUrl?: string;
 };
 
+function getUrlFromUnknown(value: unknown): string | undefined {
+  if (typeof value === "string") {
+    return value.trim() || undefined;
+  }
+
+  if (value && typeof value === "object" && "secure_url" in value) {
+    const secureUrl = (value as { secure_url?: unknown }).secure_url;
+    return typeof secureUrl === "string" && secureUrl.trim() ? secureUrl.trim() : undefined;
+  }
+
+  return undefined;
+}
+
 export default function HomePage() {
   const searchParams = useSearchParams();
 
@@ -453,10 +466,10 @@ export default function HomePage() {
           subtotal: item.subtotal,
           note: item.note,
         })),
-        paymentProofUrl: String(
-          responseData.payment_proof_url ?? responseData.paymentProofUrl ?? "",
-        ).trim() || undefined,
-        receiptUrl: String(responseData.receipt_url ?? responseData.receiptUrl ?? "").trim() || undefined,
+        paymentProofUrl: getUrlFromUnknown(
+          responseData.payment_proof_url ?? responseData.paymentProofUrl,
+        ),
+        receiptUrl: getUrlFromUnknown(responseData.receipt_url ?? responseData.receiptUrl),
       });
 
       setIsOrderSuccess(true);
