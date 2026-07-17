@@ -5,6 +5,9 @@ const BRIDGE_API_URL = (
   process.env.NEXT_PUBLIC_BRIDGE_API_URL?.trim() || DEFAULT_BRIDGE_API_URL
 ).replace(/\/$/, "");
 
+export const DEFAULT_RECEIPT_FOOTER =
+  "Barang yang sudah dibeli tidak dapat ditukar/dikembalikan";
+
 export interface MenuCategory {
   id: string;
   name: string;
@@ -97,6 +100,7 @@ export interface PublicSettingsResponse {
   qrisImageUrl: string | null;
   allowPayAtCashier: boolean;
   isPaymentProofMandatory: boolean;
+  receiptFooter: string;
 }
 
 export interface UpdateQrisImageInput {
@@ -111,6 +115,17 @@ export interface UpdateQrisImageInput {
 export interface UpdateQrisImageResponse {
   tenantId?: string;
   qrisImageUrl?: string;
+}
+
+export interface UpdateReceiptFooterInput {
+  tenantId: string;
+  receiptFooter?: string;
+  settingsKey?: string;
+}
+
+export interface UpdateReceiptFooterResponse {
+  tenantId?: string;
+  receiptFooter?: string;
 }
 
 interface RawApiResponse {
@@ -477,6 +492,7 @@ export async function getPublicSettings(
       qrisImageUrl: null,
       allowPayAtCashier: true,
       isPaymentProofMandatory: true,
+      receiptFooter: DEFAULT_RECEIPT_FOOTER,
     };
   }
 
@@ -505,6 +521,7 @@ export async function getPublicSettings(
         allow_pay_at_cashier?: unknown;
         is_payment_proof_mandatory?: unknown;
         enable_qris_ocr?: unknown;
+        receipt_footer?: unknown;
       };
     };
     config?: {
@@ -512,6 +529,7 @@ export async function getPublicSettings(
       allow_pay_at_cashier?: unknown;
       is_payment_proof_mandatory?: unknown;
       enable_qris_ocr?: unknown;
+      receipt_footer?: unknown;
     };
   };
 
@@ -527,6 +545,12 @@ export async function getPublicSettings(
   const mandatoryFromRoot = json.config?.is_payment_proof_mandatory;
   const ocrFromData = json.data?.config?.enable_qris_ocr;
   const ocrFromRoot = json.config?.enable_qris_ocr;
+  const footerFromData = json.data?.config?.receipt_footer;
+  const footerFromRoot = json.config?.receipt_footer;
+  const receiptFooter =
+    (typeof footerFromData === "string" && footerFromData.trim()) ||
+    (typeof footerFromRoot === "string" && footerFromRoot.trim()) ||
+    DEFAULT_RECEIPT_FOOTER;
 
   return {
     qrisImageUrl,
@@ -546,6 +570,7 @@ export async function getPublicSettings(
         : typeof ocrFromRoot === "boolean"
         ? ocrFromRoot
         : true,
+    receiptFooter,
   };
 }
 
@@ -600,5 +625,52 @@ export async function updateQrisImage({
   return json.data ?? {
     tenantId: json.tenantId,
     qrisImageUrl: json.qrisImageUrl,
+  };
+}
+
+export async function updateReceiptFooter({
+  tenantId,
+  receiptFooter,
+  settingsKey,
+}: UpdateReceiptFooterInput): Promise<UpdateReceiptFooterResponse> {
+  if (!tenantId) {
+    throw new Error("tenantId is required to update receipt footer.");
+  }
+
+  const normalizedFooter =
+    (typeof receiptFooter === "string" && receiptFooter.trim()) ||
+    DEFAULT_RECEIPT_FOOTER;
+
+  const url = new URL("/api/v1/settings/receipt-footer", BRIDGE_API_URL);
+  const response = await fetch(url.toString(), {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      ...(settingsKey ? { "x-goldenity-settings-key": settingsKey.trim() } : {}),
+    },
+    body: JSON.stringify({
+      tenantId,
+      receiptFooter: normalizedFooter,
+    }),
+  });
+
+  const json = (await response.json().catch(() => ({}))) as {
+    data?: UpdateReceiptFooterResponse;
+    tenantId?: string;
+    receiptFooter?: string;
+    message?: string;
+  };
+
+  if (!response.ok) {
+    const message =
+      typeof json.message === "string"
+        ? json.message
+        : `Failed to update receipt footer (${response.status}).`;
+    throw new Error(message);
+  }
+
+  return json.data ?? {
+    tenantId: json.tenantId,
+    receiptFooter: json.receiptFooter,
   };
 }

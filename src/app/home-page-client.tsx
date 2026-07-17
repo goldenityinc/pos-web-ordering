@@ -3,6 +3,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { useSearchParams } from "next/navigation";
 import {
+  DEFAULT_RECEIPT_FOOTER,
   getPublicSettings,
   getMenu,
   BranchInfo,
@@ -10,6 +11,7 @@ import {
   MenuProduct,
   OrderItemInput,
   submitOrder,
+  updateReceiptFooter,
   updateQrisImage,
 } from "../services/api";
 
@@ -55,6 +57,7 @@ type OnlineReceiptSnapshot = {
   orderNote?: string;
   paymentProofUrl?: string;
   receiptUrl?: string;
+  receiptFooter: string;
 };
 
 function getUrlFromUnknown(value: unknown): string | undefined {
@@ -110,6 +113,9 @@ export default function HomePage() {
   const [settingsQrisPreviewUrl, setSettingsQrisPreviewUrl] = useState("");
   const [settingsQrisMessage, setSettingsQrisMessage] = useState("");
   const [settingsQrisError, setSettingsQrisError] = useState<string | null>(null);
+  const [settingsReceiptFooter, setSettingsReceiptFooter] = useState<string>(
+    DEFAULT_RECEIPT_FOOTER,
+  );
   const [isSavingQris, setIsSavingQris] = useState(false);
   const [paymentProofFile, setPaymentProofFile] = useState<File | null>(null);
   const [paymentProofPreviewUrl, setPaymentProofPreviewUrl] = useState<string>("");
@@ -215,6 +221,7 @@ export default function HomePage() {
         setQrisImageUrl(settings.qrisImageUrl);
         setAllowPayAtCashier(settings.allowPayAtCashier !== false);
         setIsPaymentProofMandatory(settings.isPaymentProofMandatory !== false);
+        setSettingsReceiptFooter(settings.receiptFooter || DEFAULT_RECEIPT_FOOTER);
         if (settings.allowPayAtCashier === false) {
           setPaymentMethod("QRIS");
         }
@@ -225,6 +232,7 @@ export default function HomePage() {
         setQrisImageUrl(null);
         setAllowPayAtCashier(true);
         setIsPaymentProofMandatory(true);
+        setSettingsReceiptFooter(DEFAULT_RECEIPT_FOOTER);
       }
     };
 
@@ -489,6 +497,7 @@ export default function HomePage() {
           responseData.payment_proof_url ?? responseData.paymentProofUrl,
         ),
         receiptUrl: getUrlFromUnknown(responseData.receipt_url ?? responseData.receiptUrl),
+        receiptFooter: settingsReceiptFooter.trim() || DEFAULT_RECEIPT_FOOTER,
       });
 
       setIsOrderSuccess(true);
@@ -560,33 +569,43 @@ export default function HomePage() {
       return;
     }
 
-    if (!settingsQrisFile) {
-      setSettingsQrisError("Pilih file QRIS terlebih dahulu.");
-      return;
-    }
-
     setIsSavingQris(true);
     setSettingsQrisError(null);
     setSettingsQrisMessage("");
 
     try {
-      const dataUrl = await readFileAsDataUrl(settingsQrisFile);
-      const result = await updateQrisImage({
-        tenantId,
-        qrisImageBase64: dataUrl,
-        fileName: settingsQrisFile.name,
-        contentType: settingsQrisFile.type || "image/png",
-        settingsKey: settingsQrisKey,
-      });
+      if (settingsQrisFile) {
+        const dataUrl = await readFileAsDataUrl(settingsQrisFile);
+        const result = await updateQrisImage({
+          tenantId,
+          qrisImageBase64: dataUrl,
+          fileName: settingsQrisFile.name,
+          contentType: settingsQrisFile.type || "image/png",
+          settingsKey: settingsQrisKey,
+        });
 
-      if (result.qrisImageUrl) {
-        setQrisImageUrl(result.qrisImageUrl);
+        if (result.qrisImageUrl) {
+          setQrisImageUrl(result.qrisImageUrl);
+        }
       }
 
-      setSettingsQrisMessage("QR static berhasil disimpan.");
+      const footerResult = await updateReceiptFooter({
+        tenantId,
+        receiptFooter: settingsReceiptFooter,
+        settingsKey: settingsQrisKey,
+      });
+      const resolvedFooter =
+        footerResult.receiptFooter?.trim() || settingsReceiptFooter.trim() || DEFAULT_RECEIPT_FOOTER;
+      setSettingsReceiptFooter(resolvedFooter);
+
+      setSettingsQrisMessage(
+        settingsQrisFile
+          ? "QR static dan footer struk berhasil disimpan."
+          : "Footer struk berhasil disimpan.",
+      );
       setSettingsQrisFile(null);
     } catch (err) {
-      const message = err instanceof Error ? err.message : "Gagal menyimpan QR static.";
+      const message = err instanceof Error ? err.message : "Gagal menyimpan pengaturan web.";
       setSettingsQrisError(message);
     } finally {
       setIsSavingQris(false);
@@ -660,7 +679,7 @@ export default function HomePage() {
       orderReceipt.paymentProofUrl ? `Bukti Transfer: ${orderReceipt.paymentProofUrl}` : "",
       orderReceipt.receiptUrl ? `Struk URL: ${orderReceipt.receiptUrl}` : "",
       "",
-      "Terima kasih telah memesan.",
+      orderReceipt.receiptFooter?.trim() || DEFAULT_RECEIPT_FOOTER,
     ].filter((line) => line.length > 0);
 
     const fileName =
@@ -755,6 +774,18 @@ export default function HomePage() {
                 className="block w-full rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm text-slate-700"
               />
 
+              <label className="block text-sm font-semibold text-slate-800" htmlFor="settings-receipt-footer">
+                Pesan Footer Struk
+              </label>
+              <textarea
+                id="settings-receipt-footer"
+                value={settingsReceiptFooter}
+                onChange={(event) => setSettingsReceiptFooter(event.target.value)}
+                placeholder={DEFAULT_RECEIPT_FOOTER}
+                rows={3}
+                className="w-full rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm text-slate-700 outline-none ring-emerald-300 placeholder:text-slate-400 focus:ring-2"
+              />
+
               {settingsQrisPreviewUrl ? (
                 <div className="overflow-hidden rounded-2xl border border-slate-200 bg-white p-2">
                   <img
@@ -776,10 +807,10 @@ export default function HomePage() {
               <button
                 type="button"
                 onClick={() => void handleSaveSettingsQris()}
-                disabled={isSavingQris || !tenantId || !settingsQrisFile}
+                disabled={isSavingQris || !tenantId}
                 className="w-full rounded-xl bg-emerald-600 px-4 py-3 text-sm font-bold text-white shadow-sm transition hover:bg-emerald-700 disabled:cursor-not-allowed disabled:opacity-70"
               >
-                {isSavingQris ? "Menyimpan..." : "Simpan QR Static"}
+                {isSavingQris ? "Menyimpan..." : "Simpan Pengaturan Web"}
               </button>
 
               {settingsQrisMessage ? (
