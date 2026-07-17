@@ -99,6 +99,20 @@ export interface PublicSettingsResponse {
   isPaymentProofMandatory: boolean;
 }
 
+export interface UpdateQrisImageInput {
+  tenantId: string;
+  qrisImageBase64?: string;
+  qrisImageUrl?: string;
+  fileName?: string;
+  contentType?: string;
+  settingsKey?: string;
+}
+
+export interface UpdateQrisImageResponse {
+  tenantId?: string;
+  qrisImageUrl?: string;
+}
+
 interface RawApiResponse {
   data?: unknown;
   tenant?: TenantInfo;
@@ -532,5 +546,59 @@ export async function getPublicSettings(
         : typeof ocrFromRoot === "boolean"
         ? ocrFromRoot
         : true,
+  };
+}
+
+
+export async function updateQrisImage({
+  tenantId,
+  qrisImageBase64,
+  qrisImageUrl,
+  fileName,
+  contentType,
+  settingsKey,
+}: UpdateQrisImageInput): Promise<UpdateQrisImageResponse> {
+  if (!tenantId) {
+    throw new Error("tenantId is required to update QRIS image.");
+  }
+
+  if (!qrisImageBase64 && !qrisImageUrl) {
+    throw new Error("QRIS image payload is required.");
+  }
+
+  const url = new URL("/api/v1/settings/qris-image", BRIDGE_API_URL);
+  const response = await fetch(url.toString(), {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      ...(settingsKey ? { "x-goldenity-settings-key": settingsKey.trim() } : {}),
+    },
+    body: JSON.stringify({
+      tenantId,
+      qrisImageBase64,
+      qrisImageUrl,
+      fileName,
+      contentType,
+    }),
+  });
+
+  const json = (await response.json().catch(() => ({}))) as {
+    data?: UpdateQrisImageResponse;
+    qrisImageUrl?: string;
+    tenantId?: string;
+    message?: string;
+  };
+
+  if (!response.ok) {
+    const message =
+      typeof json.message === "string"
+        ? json.message
+        : `Failed to update QRIS image (${response.status}).`;
+    throw new Error(message);
+  }
+
+  return json.data ?? {
+    tenantId: json.tenantId,
+    qrisImageUrl: json.qrisImageUrl,
   };
 }

@@ -10,6 +10,7 @@ import {
   MenuProduct,
   OrderItemInput,
   submitOrder,
+  updateQrisImage,
 } from "../services/api";
 
 export const dynamic = "force-dynamic";
@@ -83,6 +84,8 @@ export default function HomePage() {
     searchParams.get("branchId")?.trim() || searchParams.get("branch_id")?.trim() || "";
   const branchNameFromUrl =
     searchParams.get("branchName")?.trim() || searchParams.get("branch_name")?.trim() || "";
+  const mode = searchParams.get("mode")?.trim().toLowerCase() || "";
+  const isSettingsMode = mode === "settings" || searchParams.get("settings") === "1";
 
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -102,6 +105,12 @@ export default function HomePage() {
   const [isPaymentProofMandatory, setIsPaymentProofMandatory] = useState(true);
   const [qrisImageUrl, setQrisImageUrl] = useState<string | null>(null);
   const [qrisLoadError, setQrisLoadError] = useState<string | null>(null);
+  const [settingsQrisKey, setSettingsQrisKey] = useState("");
+  const [settingsQrisFile, setSettingsQrisFile] = useState<File | null>(null);
+  const [settingsQrisPreviewUrl, setSettingsQrisPreviewUrl] = useState("");
+  const [settingsQrisMessage, setSettingsQrisMessage] = useState("");
+  const [settingsQrisError, setSettingsQrisError] = useState<string | null>(null);
+  const [isSavingQris, setIsSavingQris] = useState(false);
   const [paymentProofFile, setPaymentProofFile] = useState<File | null>(null);
   const [paymentProofPreviewUrl, setPaymentProofPreviewUrl] = useState<string>("");
   const [copySuccess, setCopySuccess] = useState<string>("");
@@ -185,7 +194,17 @@ export default function HomePage() {
   }, [allowPayAtCashier, isCheckoutOpen, paymentProofPreviewUrl]);
 
   useEffect(() => {
-    if (!isCheckoutOpen || !tenantId) {
+    if (!settingsQrisPreviewUrl) {
+      return;
+    }
+
+    return () => {
+      URL.revokeObjectURL(settingsQrisPreviewUrl);
+    };
+  }, [settingsQrisPreviewUrl]);
+
+  useEffect(() => {
+    if ((!isCheckoutOpen && !isSettingsMode) || !tenantId) {
       return;
     }
 
@@ -210,7 +229,7 @@ export default function HomePage() {
     };
 
     void run();
-  }, [branchId, isCheckoutOpen, tenantId]);
+  }, [branchId, isCheckoutOpen, isSettingsMode, tenantId]);
 
   const productById = useMemo(() => {
     return new Map(products.map((product) => [product.id, product]));
@@ -500,6 +519,80 @@ export default function HomePage() {
     setPaymentProofPreviewUrl(previewUrl);
   };
 
+  const handleSettingsQrisFileChange = (file: File | null) => {
+    if (settingsQrisPreviewUrl) {
+      URL.revokeObjectURL(settingsQrisPreviewUrl);
+    }
+
+    setSettingsQrisMessage("");
+    setSettingsQrisError(null);
+
+    if (!file) {
+      setSettingsQrisFile(null);
+      setSettingsQrisPreviewUrl("");
+      return;
+    }
+
+    const previewUrl = URL.createObjectURL(file);
+    setSettingsQrisFile(file);
+    setSettingsQrisPreviewUrl(previewUrl);
+  };
+
+  const readFileAsDataUrl = (file: File) => {
+    return new Promise<string>((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onload = () => {
+        const result = reader.result;
+        if (typeof result === "string") {
+          resolve(result);
+          return;
+        }
+        reject(new Error("Gagal membaca file QRIS."));
+      };
+      reader.onerror = () => reject(new Error("Gagal membaca file QRIS."));
+      reader.readAsDataURL(file);
+    });
+  };
+
+  const handleSaveSettingsQris = async () => {
+    if (!tenantId) {
+      setSettingsQrisError("Tenant tidak ditemukan pada URL.");
+      return;
+    }
+
+    if (!settingsQrisFile) {
+      setSettingsQrisError("Pilih file QRIS terlebih dahulu.");
+      return;
+    }
+
+    setIsSavingQris(true);
+    setSettingsQrisError(null);
+    setSettingsQrisMessage("");
+
+    try {
+      const dataUrl = await readFileAsDataUrl(settingsQrisFile);
+      const result = await updateQrisImage({
+        tenantId,
+        qrisImageBase64: dataUrl,
+        fileName: settingsQrisFile.name,
+        contentType: settingsQrisFile.type || "image/png",
+        settingsKey: settingsQrisKey,
+      });
+
+      if (result.qrisImageUrl) {
+        setQrisImageUrl(result.qrisImageUrl);
+      }
+
+      setSettingsQrisMessage("QR static berhasil disimpan.");
+      setSettingsQrisFile(null);
+    } catch (err) {
+      const message = err instanceof Error ? err.message : "Gagal menyimpan QR static.";
+      setSettingsQrisError(message);
+    } finally {
+      setIsSavingQris(false);
+    }
+  };
+
   const handleCopyGrandTotal = async () => {
     try {
       await navigator.clipboard.writeText(String(cartSummary.total));
@@ -600,6 +693,11 @@ export default function HomePage() {
             <span className="inline-flex rounded-full bg-orange-100 px-3 py-1 text-xs font-semibold text-orange-700">
               Meja: {tableNumber}
             </span>
+            {isSettingsMode ? (
+              <span className="inline-flex rounded-full bg-emerald-100 px-3 py-1 text-xs font-semibold text-emerald-700">
+                Mode Setting
+              </span>
+            ) : null}
             {(branchInfo?.name || branchNameFromUrl) ? (
               <span className="inline-flex rounded-full bg-slate-100 px-3 py-1 text-xs font-semibold text-slate-700">
                 Cabang: {branchInfo?.name || branchNameFromUrl}
@@ -607,6 +705,102 @@ export default function HomePage() {
             ) : null}
           </div>
         </header>
+
+        {isSettingsMode ? (
+          <section className="mt-4 rounded-3xl bg-white p-4 shadow-sm ring-1 ring-emerald-100">
+            <div className="flex items-center justify-between gap-3">
+              <div>
+                <p className="text-xs font-semibold uppercase tracking-[0.18em] text-emerald-600">
+                  Pengaturan QR Static
+                </p>
+                <h2 className="mt-1 text-lg font-bold text-slate-900">Upload QRIS untuk web</h2>
+              </div>
+              <span className="rounded-full bg-emerald-50 px-3 py-1 text-xs font-semibold text-emerald-700">
+                Internal
+              </span>
+            </div>
+
+            <div className="mt-4 space-y-3 rounded-2xl border border-emerald-100 bg-emerald-50/40 p-3">
+              <label className="block text-sm font-semibold text-slate-800" htmlFor="settings-tenant-id">
+                Tenant ID
+              </label>
+              <input
+                id="settings-tenant-id"
+                type="text"
+                value={tenantId}
+                readOnly
+                className="w-full rounded-xl border border-slate-200 bg-slate-100 px-3 py-2 text-sm text-slate-700"
+              />
+
+              <label className="block text-sm font-semibold text-slate-800" htmlFor="settings-qris-key">
+                Kunci pengaturan QRIS
+              </label>
+              <input
+                id="settings-qris-key"
+                type="password"
+                value={settingsQrisKey}
+                onChange={(event) => setSettingsQrisKey(event.target.value)}
+                placeholder="Opsional jika server memakai WEB_SETTINGS_UPLOAD_KEY"
+                className="w-full rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm text-slate-700 outline-none ring-emerald-300 placeholder:text-slate-400 focus:ring-2"
+              />
+
+              <label className="block text-sm font-semibold text-slate-800" htmlFor="settings-qris-file">
+                File QR Static
+              </label>
+              <input
+                id="settings-qris-file"
+                type="file"
+                accept="image/*"
+                onChange={(event) => handleSettingsQrisFileChange(event.target.files?.[0] ?? null)}
+                className="block w-full rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm text-slate-700"
+              />
+
+              {settingsQrisPreviewUrl ? (
+                <div className="overflow-hidden rounded-2xl border border-slate-200 bg-white p-2">
+                  <img
+                    src={settingsQrisPreviewUrl}
+                    alt="Preview QR static"
+                    className="h-64 w-full rounded-xl object-contain"
+                  />
+                </div>
+              ) : qrisImageUrl ? (
+                <div className="overflow-hidden rounded-2xl border border-slate-200 bg-white p-2">
+                  <img
+                    src={qrisImageUrl}
+                    alt="QR static aktif"
+                    className="h-64 w-full rounded-xl object-contain"
+                  />
+                </div>
+              ) : null}
+
+              <button
+                type="button"
+                onClick={() => void handleSaveSettingsQris()}
+                disabled={isSavingQris || !tenantId || !settingsQrisFile}
+                className="w-full rounded-xl bg-emerald-600 px-4 py-3 text-sm font-bold text-white shadow-sm transition hover:bg-emerald-700 disabled:cursor-not-allowed disabled:opacity-70"
+              >
+                {isSavingQris ? "Menyimpan..." : "Simpan QR Static"}
+              </button>
+
+              {settingsQrisMessage ? (
+                <p className="rounded-xl border border-emerald-200 bg-emerald-50 px-3 py-2 text-sm text-emerald-700">
+                  {settingsQrisMessage}
+                </p>
+              ) : null}
+
+              {settingsQrisError ? (
+                <p className="rounded-xl border border-rose-200 bg-rose-50 px-3 py-2 text-sm text-rose-700">
+                  {settingsQrisError}
+                </p>
+              ) : null}
+
+              <p className="text-xs leading-relaxed text-slate-500">
+                Upload gambar QRIS di sini untuk dipakai oleh customer ordering web. Jika server memakai kunci pengaturan,
+                isi kolom di atas sebelum menyimpan.
+              </p>
+            </div>
+          </section>
+        ) : null}
 
         {!tenantId ? (
           <div className="mt-4 rounded-xl border border-dashed border-orange-200 bg-white p-4 text-sm text-slate-600">
