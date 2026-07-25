@@ -14,6 +14,7 @@ import {
   updateReceiptFooter,
   updateQrisImage,
 } from "../services/api";
+import { useCart } from "../contexts/cart-context";
 
 export const dynamic = "force-dynamic";
 
@@ -23,12 +24,6 @@ const rupiahFormatter = new Intl.NumberFormat("id-ID", {
   maximumFractionDigits: 0,
 });
 
-type CartItemState = {
-  quantity: number;
-  note?: string;
-};
-
-type CartMap = Record<string, CartItemState>;
 type GroupedMenuSection = {
   id: string;
   name: string;
@@ -89,6 +84,7 @@ export default function HomePage() {
     searchParams.get("branchName")?.trim() || searchParams.get("branch_name")?.trim() || "";
   const mode = searchParams.get("mode")?.trim().toLowerCase() || "";
   const isSettingsMode = mode === "settings" || searchParams.get("settings") === "1";
+  const { addToCart, cart, clearCart, decreaseFromCart, updateItemNote } = useCart();
 
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -96,7 +92,6 @@ export default function HomePage() {
   const [branchInfo, setBranchInfo] = useState<BranchInfo | undefined>(undefined);
   const [categories, setCategories] = useState<MenuCategory[]>([]);
   const [products, setProducts] = useState<MenuProduct[]>([]);
-  const [cart, setCart] = useState<CartMap>({});
   const [searchText, setSearchText] = useState("");
   const [activeCategoryId, setActiveCategoryId] = useState<string>("all");
   const [isCheckoutOpen, setIsCheckoutOpen] = useState(false);
@@ -243,20 +238,26 @@ export default function HomePage() {
     return new Map(products.map((product) => [product.id, product]));
   }, [products]);
 
+  const cartByProductId = useMemo(() => {
+    return new Map(cart.map((item) => [item.productId, item]));
+  }, [cart]);
+
   const cartSummary = useMemo(() => {
     let itemCount = 0;
     let total = 0;
 
-    for (const product of products) {
-      const quantity = cart[product.id]?.quantity ?? 0;
-      if (quantity > 0) {
-        itemCount += quantity;
-        total += quantity * product.price;
+    for (const item of cart) {
+      const product = productById.get(item.productId);
+      if (!product || item.quantity <= 0) {
+        continue;
       }
+
+      itemCount += item.quantity;
+      total += item.quantity * product.price;
     }
 
     return { itemCount, total };
-  }, [cart, products]);
+  }, [cart, productById]);
 
   const groupedSections = useMemo<GroupedMenuSection[]>(() => {
     const normalizedSearch = searchText.trim().toLowerCase();
@@ -331,7 +332,8 @@ export default function HomePage() {
       note?: string;
     }> = [];
 
-    for (const [productId, item] of Object.entries(cart)) {
+    for (const item of cart) {
+      const productId = item.productId;
       const quantity = item.quantity;
       if (quantity <= 0) {
         continue;
@@ -354,51 +356,6 @@ export default function HomePage() {
 
     return rows;
   }, [cart, productById]);
-
-  const addToCart = (productId: string) => {
-    setCart((prev) => ({
-      ...prev,
-      [productId]: {
-        quantity: (prev[productId]?.quantity ?? 0) + 1,
-        note: prev[productId]?.note,
-      },
-    }));
-  };
-
-  const decreaseFromCart = (productId: string) => {
-    setCart((prev) => {
-      const current = prev[productId]?.quantity ?? 0;
-      if (current <= 1) {
-        const { [productId]: _removed, ...rest } = prev;
-        return rest;
-      }
-
-      return {
-        ...prev,
-        [productId]: {
-          quantity: current - 1,
-          note: prev[productId]?.note,
-        },
-      };
-    });
-  };
-
-  const updateItemNote = (productId: string, newNote: string) => {
-    setCart((prev) => {
-      const existing = prev[productId];
-      if (!existing || existing.quantity <= 0) {
-        return prev;
-      }
-
-      return {
-        ...prev,
-        [productId]: {
-          ...existing,
-          note: newNote,
-        },
-      };
-    });
-  };
 
   const handleOpenCheckout = () => {
     if (cartSummary.itemCount === 0) {
@@ -502,7 +459,7 @@ export default function HomePage() {
 
       setIsOrderSuccess(true);
       setIsQrisFlowOpen(false);
-      setCart({});
+      clearCart();
     } catch (err) {
       const message =
         err instanceof Error ? err.message : "Gagal mengirim pesanan.";
@@ -904,7 +861,7 @@ export default function HomePage() {
               <h2 className="mb-3 text-base font-extrabold tracking-wide text-slate-900">{section.name}</h2>
               <div className="space-y-3">
                 {section.items.map((product) => {
-                  const quantity = cart[product.id]?.quantity ?? 0;
+                  const quantity = cartByProductId.get(product.id)?.quantity ?? 0;
                   const isOutOfStock =
                     !product.is_available ||
                     (!product.isAvailable && (product.stock ?? 0) <= 0);

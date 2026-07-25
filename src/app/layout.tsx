@@ -1,6 +1,8 @@
 import type { Metadata } from "next";
 import type { ReactNode } from "react";
 import "./globals.css";
+import AppErrorBoundary from "../components/app-error-boundary";
+import { CartProvider } from "../contexts/cart-context";
 
 export const metadata: Metadata = {
   title: "Goldenity Web Ordering",
@@ -14,7 +16,11 @@ type RootLayoutProps = {
 export default function RootLayout({ children }: RootLayoutProps) {
   return (
     <html lang="id">
-      <body className="bg-slate-50 text-slate-900 antialiased">{children}</body>
+      <body className="bg-slate-50 text-slate-900 antialiased">
+        <AppErrorBoundary>
+          <CartProvider>{children}</CartProvider>
+        </AppErrorBoundary>
+      </body>
     </html>
   );
 }
