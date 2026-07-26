@@ -1,5 +1,6 @@
 "use client";
 
+import { useEffect } from "react";
 import { safeClearSessionStorage, safeClearStorage } from "../lib/app-storage";
 
 type RecoveryScreenProps = {
@@ -7,6 +8,7 @@ type RecoveryScreenProps = {
   description?: string;
   isAutoRecovered?: boolean;
   actionLabel?: string;
+  error?: Error | null;
 };
 
 export default function RecoveryScreen({
@@ -14,7 +16,14 @@ export default function RecoveryScreen({
   description = "Terjadi gangguan saat memuat halaman. Data lokal yang bermasalah bisa dibersihkan agar aplikasi dapat dipakai lagi.",
   isAutoRecovered = false,
   actionLabel = "Muat Ulang Halaman",
+  error,
 }: RecoveryScreenProps) {
+  useEffect(() => {
+    if (error) {
+      alert("Caught by Boundary: " + error.name + " - " + error.message);
+    }
+  }, [error]);
+
   return (
     <main className="flex min-h-screen items-center justify-center bg-slate-950 px-4 text-white">
       <div className="w-full max-w-md rounded-3xl border border-white/10 bg-white/10 p-6 shadow-2xl backdrop-blur">

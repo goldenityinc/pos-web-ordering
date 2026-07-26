@@ -101,6 +101,7 @@ export default class AppErrorBoundary extends Component<
           title="Aplikasi sempat crash"
           description="Kami menangkap error render atau hydration. Reset akan membersihkan state lokal yang rusak lalu memuat ulang aplikasi."
           isAutoRecovered={this.state.autoRecovered}
+          error={this.state.error}
         />
       );
     }

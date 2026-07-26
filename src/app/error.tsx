@@ -26,6 +26,7 @@ export default function ErrorPage({ error, reset }: ErrorPageProps) {
       title="Halaman gagal dimuat"
       description="Kami menangkap error render atau hydration pada halaman ini. Reset akan menghapus state lokal yang rusak sebelum mencoba memuat ulang."
       isAutoRecovered={autoRecovered}
+      error={error}
     />
   );
 }

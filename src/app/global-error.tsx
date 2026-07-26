@@ -28,6 +28,7 @@ export default function GlobalErrorPage({ error, reset }: GlobalErrorPageProps) 
           title="Aplikasi perlu dipulihkan"
           description="Terjadi error fatal di level aplikasi. Reset akan membersihkan state lokal yang korup lalu mencoba memuat ulang aplikasi."
           isAutoRecovered={autoRecovered}
+          error={error}
         />
       </body>
     </html>
