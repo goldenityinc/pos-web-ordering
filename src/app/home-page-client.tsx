@@ -55,6 +55,20 @@ type OnlineReceiptSnapshot = {
   receiptFooter: string;
 };
 
+function parseDateStringSafely(value: string) {
+  const normalizedValue = value.trim();
+  if (!normalizedValue) {
+    return null;
+  }
+
+  const isoCandidate = normalizedValue.includes("T")
+    ? normalizedValue
+    : normalizedValue.replace(" ", "T");
+  const parsedDate = new Date(isoCandidate);
+
+  return Number.isNaN(parsedDate.getTime()) ? null : parsedDate;
+}
+
 function getUrlFromUnknown(value: unknown): string | undefined {
   if (typeof value === "string") {
     return value.trim() || undefined;
@@ -608,8 +622,8 @@ export default function HomePage() {
       return;
     }
 
-    const createdAt = new Date(orderReceipt.createdAt);
-    const printableDate = Number.isNaN(createdAt.getTime())
+    const createdAt = parseDateStringSafely(orderReceipt.createdAt);
+    const printableDate = !createdAt
       ? orderReceipt.createdAt
       : createdAt.toLocaleString("id-ID");
 
