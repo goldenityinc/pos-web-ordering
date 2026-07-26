@@ -16,6 +16,21 @@ type RootLayoutProps = {
 export default function RootLayout({ children }: RootLayoutProps) {
   return (
     <html lang="id">
+      <head>
+        <script
+          dangerouslySetInnerHTML={{
+            __html: `
+              window.onerror = function(message, source, lineno, colno, error) {
+                alert("CRASH: " + message + "\\nFile: " + source + "\\nLine: " + lineno);
+                return false;
+              };
+              window.addEventListener("unhandledrejection", function(event) {
+                alert("PROMISE CRASH: " + (event.reason ? event.reason.toString() : "Unknown"));
+              });
+            `,
+          }}
+        />
+      </head>
       <body className="bg-slate-50 text-slate-900 antialiased">
         <AppErrorBoundary>
           <CartProvider>{children}</CartProvider>
