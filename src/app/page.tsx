@@ -1,6 +1,6 @@
-import dynamic from "next/dynamic";
+import dynamicImport from "next/dynamic";
 
-const HomePageClient = dynamic(() => import("./home-page-client"), {
+const HomePageClient = dynamicImport(() => import("./home-page-client"), {
   ssr: false,
   loading: () => (
     <main className="min-h-screen flex items-center justify-center text-gray-600">
