@@ -5,6 +5,9 @@ const BRIDGE_API_URL = (
   process.env.NEXT_PUBLIC_BRIDGE_API_URL?.trim() || DEFAULT_BRIDGE_API_URL
 ).replace(/\/$/, "");
 
+const NETWORK_WIFI_ERROR_MESSAGE =
+  "Koneksi terhalang, mohon gunakan paket data atau cek koneksi internet Anda.";
+
 export const DEFAULT_RECEIPT_FOOTER =
   "Barang yang sudah dibeli tidak dapat ditukar/dikembalikan";
 
@@ -145,6 +148,51 @@ interface RawApiResponse {
     products?: unknown[];
     items?: unknown[];
   };
+}
+
+class NetworkWifiError extends Error {
+  constructor(message = NETWORK_WIFI_ERROR_MESSAGE) {
+    super(message);
+    this.name = "NetworkWifiError";
+  }
+}
+
+function isJsonContentType(contentType: string | null) {
+  return contentType?.toLowerCase().includes("application/json") ?? false;
+}
+
+async function parseJsonResponse<T>(
+  response: Response,
+  fallbackMessage: string,
+): Promise<T> {
+  const contentType = response.headers.get("content-type");
+
+  if (!isJsonContentType(contentType)) {
+    throw new NetworkWifiError(fallbackMessage);
+  }
+
+  try {
+    return (await response.json()) as T;
+  } catch (_error) {
+    throw new NetworkWifiError(fallbackMessage);
+  }
+}
+
+async function fetchJson<T>(
+  input: RequestInfo | URL,
+  init: RequestInit,
+  fallbackMessage = NETWORK_WIFI_ERROR_MESSAGE,
+): Promise<{ response: Response; json: T }> {
+  let response: Response;
+
+  try {
+    response = await fetch(input, init);
+  } catch (_error) {
+    throw new NetworkWifiError(fallbackMessage);
+  }
+
+  const json = await parseJsonResponse<T>(response, fallbackMessage);
+  return { response, json };
 }
 
 function normalizeTenant(payload: RawApiResponse): TenantInfo | undefined {
@@ -306,19 +354,21 @@ export async function getMenu(
     url.searchParams.set("branchName", normalizedBranchName);
   }
 
-  const response = await fetch(url.toString(), {
-    method: "GET",
-    headers: {
-      "Content-Type": "application/json",
+  const { response, json } = await fetchJson<RawApiResponse>(
+    url.toString(),
+    {
+      method: "GET",
+      headers: {
+        "Content-Type": "application/json",
+      },
+      cache: "no-store",
     },
-    cache: "no-store",
-  });
+    NETWORK_WIFI_ERROR_MESSAGE,
+  );
 
   if (!response.ok) {
     throw new Error(`Failed to fetch menu (${response.status}).`);
   }
-
-  const json = (await response.json()) as RawApiResponse;
   const payload = (json.data ?? json) as RawApiResponse;
 
   if (Array.isArray(payload)) {
@@ -431,6 +481,7 @@ export async function submitOrder({
   };
 
   let response: Response;
+  let json: SubmitOrderResponse;
   if (paymentProofFile) {
     const formData = new FormData();
     formData.append("tenantId", tenantId);
@@ -459,21 +510,27 @@ export async function submitOrder({
     }
     formData.append("payment_proof", paymentProofFile);
 
-    response = await fetch(url, {
-      method: "POST",
-      body: formData,
-    });
-  } else {
-    response = await fetch(url, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
+    ({ response, json } = await fetchJson<SubmitOrderResponse>(
+      url,
+      {
+        method: "POST",
+        body: formData,
       },
-      body: JSON.stringify(payload),
-    });
+      NETWORK_WIFI_ERROR_MESSAGE,
+    ));
+  } else {
+    ({ response, json } = await fetchJson<SubmitOrderResponse>(
+      url,
+      {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify(payload),
+      },
+      NETWORK_WIFI_ERROR_MESSAGE,
+    ));
   }
-
-  const json = (await response.json().catch(() => ({}))) as SubmitOrderResponse;
 
   if (!response.ok) {
     const message = typeof json.message === "string" ? json.message : `Failed to submit order (${response.status}).`;
@@ -502,19 +559,7 @@ export async function getPublicSettings(
     url.searchParams.set("branchId", branchId.trim());
   }
 
-  const response = await fetch(url.toString(), {
-    method: "GET",
-    headers: {
-      "Content-Type": "application/json",
-    },
-    cache: "no-store",
-  });
-
-  if (!response.ok) {
-    throw new Error(`Failed to fetch settings (${response.status}).`);
-  }
-
-  const json = (await response.json()) as {
+  const { response, json } = await fetchJson<{
     data?: {
       config?: {
         qris_image_url?: unknown;
@@ -531,7 +576,21 @@ export async function getPublicSettings(
       enable_qris_ocr?: unknown;
       receipt_footer?: unknown;
     };
-  };
+  }>(
+    url.toString(),
+    {
+      method: "GET",
+      headers: {
+        "Content-Type": "application/json",
+      },
+      cache: "no-store",
+    },
+    NETWORK_WIFI_ERROR_MESSAGE,
+  );
+
+  if (!response.ok) {
+    throw new Error(`Failed to fetch settings (${response.status}).`);
+  }
 
   const fromData = json.data?.config?.qris_image_url;
   const fromRoot = json.config?.qris_image_url;
@@ -592,27 +651,29 @@ export async function updateQrisImage({
   }
 
   const url = new URL("/api/v1/settings/qris-image", BRIDGE_API_URL);
-  const response = await fetch(url.toString(), {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      ...(settingsKey ? { "x-goldenity-settings-key": settingsKey.trim() } : {}),
-    },
-    body: JSON.stringify({
-      tenantId,
-      qrisImageBase64,
-      qrisImageUrl,
-      fileName,
-      contentType,
-    }),
-  });
-
-  const json = (await response.json().catch(() => ({}))) as {
+  const { response, json } = await fetchJson<{
     data?: UpdateQrisImageResponse;
     qrisImageUrl?: string;
     tenantId?: string;
     message?: string;
-  };
+  }>(
+    url.toString(),
+    {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        ...(settingsKey ? { "x-goldenity-settings-key": settingsKey.trim() } : {}),
+      },
+      body: JSON.stringify({
+        tenantId,
+        qrisImageBase64,
+        qrisImageUrl,
+        fileName,
+        contentType,
+      }),
+    },
+    NETWORK_WIFI_ERROR_MESSAGE,
+  );
 
   if (!response.ok) {
     const message =
@@ -642,24 +703,26 @@ export async function updateReceiptFooter({
     DEFAULT_RECEIPT_FOOTER;
 
   const url = new URL("/api/v1/settings/receipt-footer", BRIDGE_API_URL);
-  const response = await fetch(url.toString(), {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      ...(settingsKey ? { "x-goldenity-settings-key": settingsKey.trim() } : {}),
-    },
-    body: JSON.stringify({
-      tenantId,
-      receiptFooter: normalizedFooter,
-    }),
-  });
-
-  const json = (await response.json().catch(() => ({}))) as {
+  const { response, json } = await fetchJson<{
     data?: UpdateReceiptFooterResponse;
     tenantId?: string;
     receiptFooter?: string;
     message?: string;
-  };
+  }>(
+    url.toString(),
+    {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        ...(settingsKey ? { "x-goldenity-settings-key": settingsKey.trim() } : {}),
+      },
+      body: JSON.stringify({
+        tenantId,
+        receiptFooter: normalizedFooter,
+      }),
+    },
+    NETWORK_WIFI_ERROR_MESSAGE,
+  );
 
   if (!response.ok) {
     const message =
