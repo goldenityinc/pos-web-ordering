@@ -4,7 +4,6 @@ type RecoveryScreenProps = {
   title?: string;
   description?: string;
   isAutoRecovered?: boolean;
-  onReset: () => void;
   actionLabel?: string;
 };
 
@@ -12,7 +11,6 @@ export default function RecoveryScreen({
   title = "Aplikasi perlu dipulihkan",
   description = "Terjadi gangguan saat memuat halaman. Data lokal yang bermasalah bisa dibersihkan agar aplikasi dapat dipakai lagi.",
   isAutoRecovered = false,
-  onReset,
   actionLabel = "Muat Ulang Halaman",
 }: RecoveryScreenProps) {
   return (
@@ -32,7 +30,11 @@ export default function RecoveryScreen({
 
         <button
           type="button"
-          onClick={onReset}
+          onClick={() => {
+            localStorage.clear();
+            sessionStorage.clear();
+            window.location.href = "/";
+          }}
           className="mt-6 w-full rounded-2xl bg-orange-500 px-4 py-3 text-sm font-bold text-white transition hover:bg-orange-600"
         >
           {actionLabel}

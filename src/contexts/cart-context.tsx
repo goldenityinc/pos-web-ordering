@@ -80,15 +80,25 @@ type CartProviderProps = {
 };
 
 export function CartProvider({ children }: CartProviderProps) {
-  const [cart, setCart] = useState<CartItem[]>(getInitialCart);
+  const [cart, setCart] = useState<CartItem[]>([]);
+  const [hasLoadedCart, setHasLoadedCart] = useState(false);
 
   useEffect(() => {
+    setCart(getInitialCart());
+    setHasLoadedCart(true);
+  }, []);
+
+  useEffect(() => {
+    if (!hasLoadedCart) {
+      return;
+    }
+
     try {
       window.localStorage.setItem(WEB_ORDER_CART_STORAGE_KEY, JSON.stringify(cart));
     } catch (_error) {
       window.localStorage.removeItem(WEB_ORDER_CART_STORAGE_KEY);
     }
-  }, [cart]);
+  }, [cart, hasLoadedCart]);
 
   const value = useMemo<CartContextValue>(
     () => ({

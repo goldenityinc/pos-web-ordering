@@ -94,11 +94,6 @@ export default class AppErrorBoundary extends Component<
     });
   };
 
-  handleReset = () => {
-    clearAppStorage();
-    window.location.reload();
-  };
-
   render() {
     if (this.state.error) {
       return (
@@ -106,7 +101,6 @@ export default class AppErrorBoundary extends Component<
           title="Aplikasi sempat crash"
           description="Kami menangkap error render atau hydration. Reset akan membersihkan state lokal yang rusak lalu memuat ulang aplikasi."
           isAutoRecovered={this.state.autoRecovered}
-          onReset={this.handleReset}
         />
       );
     }
