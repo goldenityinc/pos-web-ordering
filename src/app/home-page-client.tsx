@@ -111,6 +111,7 @@ export default function HomePage() {
   const [isCheckoutOpen, setIsCheckoutOpen] = useState(false);
   const [isQrisFlowOpen, setIsQrisFlowOpen] = useState(false);
   const [isQrisPreviewOpen, setIsQrisPreviewOpen] = useState(false);
+  const [isMounted, setIsMounted] = useState(false);
   const [customerNameInput, setCustomerNameInput] = useState("");
   const [paymentMethod, setPaymentMethod] = useState<"CASHIER" | "QRIS">("CASHIER");
   const [allowPayAtCashier, setAllowPayAtCashier] = useState(true);
@@ -133,6 +134,10 @@ export default function HomePage() {
   const [submitError, setSubmitError] = useState<string | null>(null);
   const [isOrderSuccess, setIsOrderSuccess] = useState(false);
   const [orderReceipt, setOrderReceipt] = useState<OnlineReceiptSnapshot | null>(null);
+
+  useEffect(() => {
+    setIsMounted(true);
+  }, []);
 
   useEffect(() => {
     if (!tenantId) {
@@ -335,6 +340,15 @@ export default function HomePage() {
       ...categories,
     ];
   }, [categories]);
+
+  const displayTableNumber = isMounted ? tableNumber : "-";
+  const displayBranchName = isMounted ? branchInfo?.name || branchNameFromUrl : "";
+  const displayCartSummary = isMounted
+    ? cartSummary
+    : {
+        itemCount: 0,
+        total: 0,
+      };
 
   const cartItems = useMemo(() => {
     const rows: Array<{
@@ -681,16 +695,16 @@ export default function HomePage() {
           </h1>
           <div className="mt-3 flex flex-wrap gap-2">
             <span className="inline-flex rounded-full bg-orange-100 px-3 py-1 text-xs font-semibold text-orange-700">
-              Meja: {tableNumber}
+              Meja: {displayTableNumber}
             </span>
             {isSettingsMode ? (
               <span className="inline-flex rounded-full bg-emerald-100 px-3 py-1 text-xs font-semibold text-emerald-700">
                 Mode Setting
               </span>
             ) : null}
-            {(branchInfo?.name || branchNameFromUrl) ? (
+            {displayBranchName ? (
               <span className="inline-flex rounded-full bg-slate-100 px-3 py-1 text-xs font-semibold text-slate-700">
-                Cabang: {branchInfo?.name || branchNameFromUrl}
+                Cabang: {displayBranchName}
               </span>
             ) : null}
           </div>
@@ -985,11 +999,11 @@ export default function HomePage() {
       <button
         type="button"
         onClick={handleOpenCheckout}
-        disabled={cartSummary.itemCount === 0}
+        disabled={displayCartSummary.itemCount === 0}
         className="fixed bottom-4 left-1/2 w-[calc(100%-2rem)] max-w-md -translate-x-1/2 rounded-2xl bg-slate-900 px-5 py-4 text-left text-white shadow-lg ring-1 ring-black/10"
       >
         <p className="text-sm font-semibold">
-          {cartSummary.itemCount} items | {rupiahFormatter.format(cartSummary.total)}
+          {displayCartSummary.itemCount} items | {rupiahFormatter.format(displayCartSummary.total)}
         </p>
         <p className="text-xs text-slate-300">Tap untuk lanjut ke checkout</p>
       </button>
@@ -1009,7 +1023,7 @@ export default function HomePage() {
                   Tutup
                 </button>
               </div>
-              <p className="text-xs text-slate-500">{tenantName} • Meja {tableNumber}</p>
+              <p className="text-xs text-slate-500">{tenantName} • Meja {displayTableNumber}</p>
             </div>
 
             {isOrderSuccess ? (
@@ -1088,7 +1102,7 @@ export default function HomePage() {
                         <span className="text-sm text-slate-500">Grand Total</span>
                         <div className="flex items-center gap-2">
                           <span className="text-lg font-extrabold text-orange-600">
-                            {rupiahFormatter.format(cartSummary.total)}
+                            {rupiahFormatter.format(displayCartSummary.total)}
                           </span>
                           <button
                             type="button"
@@ -1234,11 +1248,11 @@ export default function HomePage() {
                     </div>
                     <div className="mt-2 flex items-center justify-between text-sm">
                       <span className="text-slate-500">Subtotal</span>
-                      <span className="font-semibold text-slate-900">{rupiahFormatter.format(cartSummary.total)}</span>
+                      <span className="font-semibold text-slate-900">{rupiahFormatter.format(displayCartSummary.total)}</span>
                     </div>
                     <div className="mt-2 flex items-center justify-between text-base">
                       <span className="font-bold text-slate-900">Grand Total</span>
-                      <span className="font-extrabold text-orange-600">{rupiahFormatter.format(cartSummary.total)}</span>
+                      <span className="font-extrabold text-orange-600">{rupiahFormatter.format(displayCartSummary.total)}</span>
                     </div>
                   </div>
 
@@ -1260,7 +1274,7 @@ export default function HomePage() {
                       ? "Mengirim pesanan..."
                       : paymentMethod === "QRIS" || !allowPayAtCashier
                       ? "Lanjut Bayar QRIS"
-                      : `Pesan ke Kasir (${rupiahFormatter.format(cartSummary.total)})`}
+                      : `Pesan ke Kasir (${rupiahFormatter.format(displayCartSummary.total)})`}
                   </button>
                 </div>
                   </>
