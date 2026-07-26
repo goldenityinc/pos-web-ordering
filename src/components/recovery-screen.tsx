@@ -32,11 +32,29 @@ export default function RecoveryScreen({
           type="button"
           onClick={() => {
             try {
+              // 1. Clear Local & Session Storage
               localStorage.clear();
               sessionStorage.clear();
+
+              // 2. Clear all Cookies
+              document.cookie.split(";").forEach((c) => {
+                document.cookie = c
+                  .replace(/^ +/, "")
+                  .replace(/=.*/, "=;expires=" + new Date().toUTCString() + ";path=/");
+              });
+
+              // 3. Unregister Service Workers (Kill PWA Cache)
+              if ("serviceWorker" in navigator) {
+                navigator.serviceWorker.getRegistrations().then(function (registrations) {
+                  for (const registration of registrations) {
+                    registration.unregister();
+                  }
+                });
+              }
             } catch (e) {
-              console.error("Storage clear failed, possibly Private Mode", e);
+              console.error("Deep wipe failed", e);
             }
+            // 4. Force hard reload with timestamp bypass
             window.location.href = "/?reset=" + new Date().getTime();
           }}
           className="mt-6 w-full rounded-2xl bg-orange-500 px-4 py-3 text-sm font-bold text-white transition hover:bg-orange-600"
