@@ -20,6 +20,79 @@ function normalizeStorageSegment(value: string | undefined, fallback: string) {
   return normalized.replace(/[^a-z0-9_-]+/g, "-");
 }
 
+export const safeGetStorage = (key: string): string | null => {
+  try {
+    if (typeof window !== "undefined") {
+      return localStorage.getItem(key);
+    }
+  } catch (e) {
+    console.warn("Safari blocked localStorage read:", e);
+  }
+
+  return null;
+};
+
+export const safeSetStorage = (key: string, value: string): void => {
+  try {
+    if (typeof window !== "undefined") {
+      localStorage.setItem(key, value);
+    }
+  } catch (e) {
+    console.warn("Safari blocked localStorage write:", e);
+  }
+};
+
+export const safeRemoveStorage = (key: string): void => {
+  try {
+    if (typeof window !== "undefined") {
+      localStorage.removeItem(key);
+    }
+  } catch (e) {
+    console.warn("Safari blocked localStorage remove:", e);
+  }
+};
+
+export const safeClearStorage = (): void => {
+  try {
+    if (typeof window !== "undefined") {
+      localStorage.clear();
+    }
+  } catch (e) {
+    console.warn("Safari blocked localStorage clear:", e);
+  }
+};
+
+export const safeClearSessionStorage = (): void => {
+  try {
+    if (typeof window !== "undefined") {
+      sessionStorage.clear();
+    }
+  } catch (e) {
+    console.warn("Safari blocked sessionStorage clear:", e);
+  }
+};
+
+function safeListStorageKeys() {
+  try {
+    if (typeof window === "undefined") {
+      return [];
+    }
+
+    const keys: string[] = [];
+    for (let index = 0; index < localStorage.length; index += 1) {
+      const key = localStorage.key(index);
+      if (key) {
+        keys.push(key);
+      }
+    }
+
+    return keys;
+  } catch (e) {
+    console.warn("Safari blocked localStorage key iteration:", e);
+    return [];
+  }
+}
+
 export function buildCartStorageKey({
   tenantId,
   branchId,
@@ -42,61 +115,38 @@ export function buildCartStorageKey({
 }
 
 export function safeParseLocalStorageJson<T>(key: string, fallback: T) {
-  if (typeof window === "undefined") {
-    return fallback;
-  }
-
   try {
-    const rawValue = window.localStorage.getItem(key);
+    const rawValue = safeGetStorage(key);
     if (!rawValue) {
       return fallback;
     }
 
     return JSON.parse(rawValue) as T;
   } catch (_error) {
-    window.localStorage.removeItem(key);
+    safeRemoveStorage(key);
     return fallback;
   }
 }
 
 export function writeLocalStorageJson(key: string, value: unknown) {
-  if (typeof window === "undefined") {
-    return;
-  }
-
   try {
-    window.localStorage.setItem(key, JSON.stringify(value));
+    safeSetStorage(key, JSON.stringify(value));
   } catch (_error) {
-    window.localStorage.removeItem(key);
+    safeRemoveStorage(key);
   }
 }
 
 export function removeLocalStorageKey(key: string) {
-  if (typeof window === "undefined") {
-    return;
-  }
-
-  window.localStorage.removeItem(key);
+  safeRemoveStorage(key);
 }
 
 export function clearAppStorage() {
-  if (typeof window === "undefined") {
-    return;
-  }
+  safeRemoveStorage(WEB_ORDER_CART_STORAGE_KEY);
 
-  window.localStorage.removeItem(WEB_ORDER_CART_STORAGE_KEY);
-
-  const keysToDelete: string[] = [];
-
-  for (let index = 0; index < window.localStorage.length; index += 1) {
-    const key = window.localStorage.key(index);
-    if (key?.startsWith(APP_STORAGE_PREFIX)) {
-      keysToDelete.push(key);
+  for (const key of safeListStorageKeys()) {
+    if (key.startsWith(APP_STORAGE_PREFIX)) {
+      safeRemoveStorage(key);
     }
-  }
-
-  for (const key of keysToDelete) {
-    window.localStorage.removeItem(key);
   }
 }
 

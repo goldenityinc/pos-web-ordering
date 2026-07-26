@@ -1,5 +1,7 @@
 "use client";
 
+import { safeClearSessionStorage, safeClearStorage } from "../lib/app-storage";
+
 type RecoveryScreenProps = {
   title?: string;
   description?: string;
@@ -33,8 +35,8 @@ export default function RecoveryScreen({
           onClick={() => {
             try {
               // 1. Clear Local & Session Storage
-              localStorage.clear();
-              sessionStorage.clear();
+              safeClearStorage();
+              safeClearSessionStorage();
 
               // 2. Clear all Cookies
               document.cookie.split(";").forEach((c) => {
