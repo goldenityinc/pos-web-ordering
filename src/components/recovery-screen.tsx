@@ -31,9 +31,13 @@ export default function RecoveryScreen({
         <button
           type="button"
           onClick={() => {
-            localStorage.clear();
-            sessionStorage.clear();
-            window.location.href = "/";
+            try {
+              localStorage.clear();
+              sessionStorage.clear();
+            } catch (e) {
+              console.error("Storage clear failed, possibly Private Mode", e);
+            }
+            window.location.href = "/?reset=" + new Date().getTime();
           }}
           className="mt-6 w-full rounded-2xl bg-orange-500 px-4 py-3 text-sm font-bold text-white transition hover:bg-orange-600"
         >
