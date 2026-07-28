@@ -108,6 +108,7 @@ export interface PublicSettingsResponse {
 
 export interface UpdateQrisImageInput {
   tenantId: string;
+  branchId?: string;
   qrisImageBase64?: string;
   qrisImageUrl?: string;
   fileName?: string;
@@ -117,17 +118,20 @@ export interface UpdateQrisImageInput {
 
 export interface UpdateQrisImageResponse {
   tenantId?: string;
+  branchId?: string;
   qrisImageUrl?: string;
 }
 
 export interface UpdateReceiptFooterInput {
   tenantId: string;
+  branchId?: string;
   receiptFooter?: string;
   settingsKey?: string;
 }
 
 export interface UpdateReceiptFooterResponse {
   tenantId?: string;
+  branchId?: string;
   receiptFooter?: string;
 }
 
@@ -636,6 +640,7 @@ export async function getPublicSettings(
 
 export async function updateQrisImage({
   tenantId,
+  branchId,
   qrisImageBase64,
   qrisImageUrl,
   fileName,
@@ -666,6 +671,7 @@ export async function updateQrisImage({
       },
       body: JSON.stringify({
         tenantId,
+        branchId,
         qrisImageBase64,
         qrisImageUrl,
         fileName,
@@ -685,12 +691,14 @@ export async function updateQrisImage({
 
   return json.data ?? {
     tenantId: json.tenantId,
+    branchId: json.data?.branchId,
     qrisImageUrl: json.qrisImageUrl,
   };
 }
 
 export async function updateReceiptFooter({
   tenantId,
+  branchId,
   receiptFooter,
   settingsKey,
 }: UpdateReceiptFooterInput): Promise<UpdateReceiptFooterResponse> {
@@ -718,6 +726,7 @@ export async function updateReceiptFooter({
       },
       body: JSON.stringify({
         tenantId,
+        branchId,
         receiptFooter: normalizedFooter,
       }),
     },
@@ -734,6 +743,7 @@ export async function updateReceiptFooter({
 
   return json.data ?? {
     tenantId: json.tenantId,
+    branchId: json.data?.branchId,
     receiptFooter: json.receiptFooter,
   };
 }

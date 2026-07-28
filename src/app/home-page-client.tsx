@@ -55,6 +55,10 @@ type OnlineReceiptSnapshot = {
   receiptFooter: string;
 };
 
+type HomePageClientProps = {
+  forcedMode?: "settings";
+};
+
 function parseDateStringSafely(value: string) {
   const normalizedValue = value.trim();
   if (!normalizedValue) {
@@ -82,7 +86,7 @@ function getUrlFromUnknown(value: unknown): string | undefined {
   return undefined;
 }
 
-export default function HomePage() {
+export default function HomePage({ forcedMode }: HomePageClientProps = {}) {
   const searchParams = useSearchParams();
 
   const tenantId =
@@ -97,7 +101,9 @@ export default function HomePage() {
   const branchNameFromUrl =
     searchParams.get("branchName")?.trim() || searchParams.get("branch_name")?.trim() || "";
   const mode = searchParams.get("mode")?.trim().toLowerCase() || "";
-  const isSettingsMode = mode === "settings" || searchParams.get("settings") === "1";
+  const isSettingsMode =
+    forcedMode === "settings" || mode === "settings" || searchParams.get("settings") === "1";
+  const isSettingsOnlyMode = forcedMode === "settings";
   const { addToCart, cart, clearCart, decreaseFromCart, updateItemNote } = useCart();
 
   const [loading, setLoading] = useState(false);
@@ -343,6 +349,11 @@ export default function HomePage() {
 
   const displayTableNumber = isMounted ? tableNumber : "-";
   const displayBranchName = isMounted ? branchInfo?.name || branchNameFromUrl : "";
+  const resolvedSettingsScope = branchId?.trim()
+    ? `Tenant ${tenantId} • Cabang ${displayBranchName || `#${branchId.trim()}`}`
+    : tenantId
+      ? `Tenant ${tenantId} • Semua cabang/default tenant`
+      : "Tenant belum dipilih";
   const displayCartSummary = isMounted
     ? cartSummary
     : {
@@ -563,6 +574,7 @@ export default function HomePage() {
         const dataUrl = await readFileAsDataUrl(settingsQrisFile);
         const result = await updateQrisImage({
           tenantId,
+          branchId,
           qrisImageBase64: dataUrl,
           fileName: settingsQrisFile.name,
           contentType: settingsQrisFile.type || "image/png",
@@ -576,6 +588,7 @@ export default function HomePage() {
 
       const footerResult = await updateReceiptFooter({
         tenantId,
+        branchId,
         receiptFooter: settingsReceiptFooter,
         settingsKey: settingsQrisKey,
       });
@@ -688,15 +701,17 @@ export default function HomePage() {
       <section className="mx-auto w-full max-w-md px-4 pt-6">
         <header className="rounded-2xl bg-white/90 p-4 shadow-sm ring-1 ring-orange-100 backdrop-blur">
           <p className="text-xs font-semibold uppercase tracking-[0.2em] text-orange-600">
-            Customer Ordering
+            {isSettingsOnlyMode ? "Web POS Settings" : "Customer Ordering"}
           </p>
           <h1 className="mt-2 text-2xl font-bold leading-tight text-slate-900">
-            {tenantName || "Customer Ordering"}
+            {tenantName || (isSettingsOnlyMode ? "Pengaturan Web POS" : "Customer Ordering")}
           </h1>
           <div className="mt-3 flex flex-wrap gap-2">
-            <span className="inline-flex rounded-full bg-orange-100 px-3 py-1 text-xs font-semibold text-orange-700">
-              Meja: {displayTableNumber}
-            </span>
+            {!isSettingsOnlyMode ? (
+              <span className="inline-flex rounded-full bg-orange-100 px-3 py-1 text-xs font-semibold text-orange-700">
+                Meja: {displayTableNumber}
+              </span>
+            ) : null}
             {isSettingsMode ? (
               <span className="inline-flex rounded-full bg-emerald-100 px-3 py-1 text-xs font-semibold text-emerald-700">
                 Mode Setting
@@ -715,16 +730,30 @@ export default function HomePage() {
             <div className="flex items-center justify-between gap-3">
               <div>
                 <p className="text-xs font-semibold uppercase tracking-[0.18em] text-emerald-600">
-                  Pengaturan QR Static
+                  Pembayaran & QRIS
                 </p>
-                <h2 className="mt-1 text-lg font-bold text-slate-900">Upload QRIS untuk web</h2>
+                <h2 className="mt-1 text-lg font-bold text-slate-900">QRIS Statis Toko</h2>
+                <p className="mt-1 text-sm text-slate-600">
+                  Unggah gambar QRIS standar toko Anda untuk ditampilkan saat pelanggan membayar.
+                </p>
               </div>
               <span className="rounded-full bg-emerald-50 px-3 py-1 text-xs font-semibold text-emerald-700">
-                Internal
+                {branchId?.trim() ? "Per Cabang" : "Default Tenant"}
               </span>
             </div>
 
             <div className="mt-4 space-y-3 rounded-2xl border border-emerald-100 bg-emerald-50/40 p-3">
+              <div className="rounded-2xl border border-emerald-100 bg-white px-3 py-3">
+                <p className="text-xs font-semibold uppercase tracking-[0.18em] text-emerald-600">
+                  Scope Penyimpanan
+                </p>
+                <p className="mt-1 text-sm font-semibold text-slate-900">{resolvedSettingsScope}</p>
+                <p className="mt-1 text-xs leading-relaxed text-slate-500">
+                  Jika `branchId` terisi, QRIS dan footer akan disimpan untuk cabang tersebut. Jika kosong,
+                  sistem memakai default tenant.
+                </p>
+              </div>
+
               <label className="block text-sm font-semibold text-slate-800" htmlFor="settings-tenant-id">
                 Tenant ID
               </label>
@@ -734,6 +763,18 @@ export default function HomePage() {
                 value={tenantId}
                 readOnly
                 className="w-full rounded-xl border border-slate-200 bg-slate-100 px-3 py-2 text-sm text-slate-700"
+              />
+
+              <label className="block text-sm font-semibold text-slate-800" htmlFor="settings-branch-id">
+                Branch ID
+              </label>
+              <input
+                id="settings-branch-id"
+                type="text"
+                value={branchId}
+                readOnly
+                placeholder="Kosong = default tenant"
+                className="w-full rounded-xl border border-slate-200 bg-slate-100 px-3 py-2 text-sm text-slate-700 placeholder:text-slate-400"
               />
 
               <label className="block text-sm font-semibold text-slate-800" htmlFor="settings-qris-key">
@@ -749,7 +790,7 @@ export default function HomePage() {
               />
 
               <label className="block text-sm font-semibold text-slate-800" htmlFor="settings-qris-file">
-                File QR Static
+                Upload Gambar QRIS
               </label>
               <input
                 id="settings-qris-file"
@@ -795,7 +836,7 @@ export default function HomePage() {
                 disabled={isSavingQris || !tenantId}
                 className="w-full rounded-xl bg-emerald-600 px-4 py-3 text-sm font-bold text-white shadow-sm transition hover:bg-emerald-700 disabled:cursor-not-allowed disabled:opacity-70"
               >
-                {isSavingQris ? "Menyimpan..." : "Simpan Pengaturan Web"}
+                {isSavingQris ? "Menyimpan..." : "Simpan Pembayaran & QRIS"}
               </button>
 
               {settingsQrisMessage ? (
@@ -811,8 +852,8 @@ export default function HomePage() {
               ) : null}
 
               <p className="text-xs leading-relaxed text-slate-500">
-                Upload gambar QRIS di sini untuk dipakai oleh customer ordering web. Jika server memakai kunci pengaturan,
-                isi kolom di atas sebelum menyimpan.
+                QRIS statis ini dipakai oleh checkout web dan dibaca ulang oleh POS berdasarkan tenant serta branch.
+                Jika server memakai kunci pengaturan, isi kolom di atas sebelum menyimpan.
               </p>
             </div>
           </section>
@@ -830,8 +871,10 @@ export default function HomePage() {
           </div>
         ) : null}
 
-        <section className="mt-4 space-y-5">
-          {!loading && !error && products.length > 0 ? (
+        {!isSettingsOnlyMode ? (
+          <>
+            <section className="mt-4 space-y-5">
+              {!loading && !error && products.length > 0 ? (
             <div className="sticky top-3 z-10 space-y-3 rounded-2xl bg-white/90 p-3 shadow-sm ring-1 ring-orange-100 backdrop-blur">
               <div className="flex items-center gap-2 rounded-xl border border-orange-100 bg-orange-50 px-3 py-2">
                 <span className="text-sm text-orange-500">⌕</span>
@@ -884,7 +927,7 @@ export default function HomePage() {
             </div>
           ) : null}
 
-          {groupedSections.map((section) => (
+              {groupedSections.map((section) => (
             <div key={section.id}>
               <h2 className="mb-3 text-base font-extrabold tracking-wide text-slate-900">{section.name}</h2>
               <div className="space-y-3">
@@ -992,11 +1035,14 @@ export default function HomePage() {
                 })}
               </div>
             </div>
-          ))}
-        </section>
+              ))}
+            </section>
+          </>
+        ) : null}
       </section>
 
-      <button
+      {!isSettingsOnlyMode ? (
+        <button
         type="button"
         onClick={handleOpenCheckout}
         disabled={displayCartSummary.itemCount === 0}
@@ -1005,10 +1051,11 @@ export default function HomePage() {
         <p className="text-sm font-semibold">
           {displayCartSummary.itemCount} items | {rupiahFormatter.format(displayCartSummary.total)}
         </p>
-        <p className="text-xs text-slate-300">Tap untuk lanjut ke checkout</p>
-      </button>
+          <p className="text-xs text-slate-300">Tap untuk lanjut ke checkout</p>
+        </button>
+      ) : null}
 
-      {isCheckoutOpen ? (
+      {!isSettingsOnlyMode && isCheckoutOpen ? (
         <div className="fixed inset-0 z-50 flex items-end bg-slate-900/45">
           <div className="mx-auto flex h-[90vh] w-full max-w-md flex-col rounded-t-3xl bg-white">
             <div className="sticky top-0 z-10 border-b border-slate-100 bg-white px-4 py-3">
@@ -1285,7 +1332,7 @@ export default function HomePage() {
         </div>
       ) : null}
 
-      {isQrisPreviewOpen && qrisImageUrl ? (
+      {!isSettingsOnlyMode && isQrisPreviewOpen && qrisImageUrl ? (
         <div className="fixed inset-0 z-[60] flex items-center justify-center bg-black/85 p-4">
           <div className="relative flex h-[92vh] w-full max-w-5xl items-center justify-center overflow-hidden rounded-3xl bg-slate-950 shadow-2xl ring-1 ring-white/10">
             <button
