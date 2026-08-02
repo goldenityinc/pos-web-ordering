@@ -140,6 +140,7 @@ export default function HomePage({ forcedMode }: HomePageClientProps = {}) {
   const [submitError, setSubmitError] = useState<string | null>(null);
   const [isOrderSuccess, setIsOrderSuccess] = useState(false);
   const [orderReceipt, setOrderReceipt] = useState<OnlineReceiptSnapshot | null>(null);
+  const [pendingOrderId, setPendingOrderId] = useState("");
 
   useEffect(() => {
     setIsMounted(true);
@@ -215,6 +216,7 @@ export default function HomePage({ forcedMode }: HomePageClientProps = {}) {
       setPaymentProofPreviewUrl("");
       setCopySuccess("");
       setOrderReceipt(null);
+      setPendingOrderId("");
       setIsQrisPreviewOpen(false);
     }
   }, [allowPayAtCashier, isCheckoutOpen, paymentProofPreviewUrl]);
@@ -240,7 +242,7 @@ export default function HomePage({ forcedMode }: HomePageClientProps = {}) {
         const settings = await getPublicSettings(tenantId, branchId);
         setQrisImageUrl(settings.qrisImageUrl);
         setAllowPayAtCashier(settings.allowPayAtCashier !== false);
-        setIsPaymentProofMandatory(settings.isPaymentProofMandatory !== false);
+        setIsPaymentProofMandatory(false);
         setSettingsReceiptFooter(settings.receiptFooter || DEFAULT_RECEIPT_FOOTER);
         if (settings.allowPayAtCashier === false) {
           setPaymentMethod("QRIS");
@@ -251,7 +253,7 @@ export default function HomePage({ forcedMode }: HomePageClientProps = {}) {
         setQrisLoadError(message);
         setQrisImageUrl(null);
         setAllowPayAtCashier(true);
-        setIsPaymentProofMandatory(true);
+        setIsPaymentProofMandatory(false);
         setSettingsReceiptFooter(DEFAULT_RECEIPT_FOOTER);
       }
     };
@@ -439,6 +441,7 @@ export default function HomePage({ forcedMode }: HomePageClientProps = {}) {
         note: item.note,
       }));
 
+      const isCompletingExistingOrder = Boolean(pendingOrderId) || Boolean(selectedProofFile);
       const response = await submitOrder({
         tenantId,
         table: tableNumber,
@@ -449,6 +452,10 @@ export default function HomePage({ forcedMode }: HomePageClientProps = {}) {
         customerName: customerNameInput,
         paymentMethod: selectedPaymentMethod,
         paymentProofFile: selectedProofFile || null,
+        orderId: pendingOrderId || undefined,
+        status: isCompletingExistingOrder ? "PREPARING" : "PENDING_PAYMENT",
+        orderStatus: isCompletingExistingOrder ? "PREPARING" : "PENDING_PAYMENT",
+        paymentStatus: isCompletingExistingOrder ? "PAID" : "PENDING_PAYMENT",
       });
 
       const responseData =
@@ -469,11 +476,51 @@ export default function HomePage({ forcedMode }: HomePageClientProps = {}) {
         responseData.id ?? responseData.orderId ?? responseData.order_id ?? response.orderId ?? "",
       ).trim();
 
+      if (!isCompletingExistingOrder) {
+        if (responseOrderId) {
+          setPendingOrderId(responseOrderId);
+        }
+
+        if (selectedPaymentMethod === "CASHIER") {
+          const paymentMethodLabel = "Bayar di Kasir";
+          setOrderReceipt({
+            orderId: responseOrderId,
+            receiptNumber,
+            createdAt: new Date().toISOString(),
+            customerName: customerNameInput.trim() || "Guest",
+            tenantName: tenantName || "Customer Ordering",
+            tableNumber,
+            branchName: branchInfo?.name || branchNameFromUrl || "-",
+            paymentMethod: paymentMethodLabel,
+            totalAmount: cartSummary.total,
+            items: cartItems.map((item) => ({
+              name: item.name,
+              quantity: item.quantity,
+              price: item.price,
+              subtotal: item.subtotal,
+              note: item.note,
+            })),
+            paymentProofUrl: getUrlFromUnknown(
+              responseData.payment_proof_url ?? responseData.paymentProofUrl,
+            ),
+            receiptUrl: getUrlFromUnknown(responseData.receipt_url ?? responseData.receiptUrl),
+            receiptFooter: settingsReceiptFooter.trim() || DEFAULT_RECEIPT_FOOTER,
+          });
+          setIsOrderSuccess(true);
+          setIsQrisFlowOpen(false);
+          clearCart();
+        } else {
+          setIsQrisFlowOpen(true);
+        }
+        return;
+      }
+
       const paymentMethodLabel =
         selectedPaymentMethod === "QRIS" ? "QRIS" : "Bayar di Kasir";
 
+      setPendingOrderId("");
       setOrderReceipt({
-        orderId: responseOrderId,
+        orderId: responseOrderId || pendingOrderId,
         receiptNumber,
         createdAt: new Date().toISOString(),
         customerName: customerNameInput.trim() || "Guest",
@@ -624,12 +671,14 @@ export default function HomePage({ forcedMode }: HomePageClientProps = {}) {
       setPaymentMethod("QRIS");
       setIsQrisFlowOpen(true);
       setSubmitError(null);
+      void handleSubmitOrder("QRIS");
       return;
     }
 
     if (paymentMethod === "QRIS") {
       setIsQrisFlowOpen(true);
       setSubmitError(null);
+      void handleSubmitOrder("QRIS");
       return;
     }
 
@@ -1108,7 +1157,7 @@ export default function HomePage({ forcedMode }: HomePageClientProps = {}) {
                 {isQrisFlowOpen ? (
                   <div className="flex flex-1 flex-col overflow-y-auto px-4 py-4">
                     <h3 className="text-xl font-extrabold text-slate-900">Pembayaran QRIS</h3>
-                    <p className="mt-1 text-sm text-slate-500">Ikuti langkah berikut sebelum kirim pesanan.</p>
+                    <p className="mt-1 text-sm text-slate-500">Pesanan Anda akan dibuat segera; bukti transfer hanya dipakai saat Anda melanjutkan tahap pembayaran.</p>
 
                     <div className="mt-4 rounded-2xl border border-orange-100 bg-orange-50 p-3">
                       {qrisImageUrl ? (

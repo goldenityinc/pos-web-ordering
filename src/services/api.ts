@@ -86,6 +86,10 @@ export interface SubmitOrderInput {
         public_id?: unknown;
       }
     | null;
+  orderId?: string;
+  status?: string;
+  orderStatus?: string;
+  paymentStatus?: string;
 }
 
 export interface SubmitOrderResponse {
@@ -443,6 +447,10 @@ export async function submitOrder({
   paymentMethod,
   paymentProofFile,
   paymentReceipt,
+  orderId,
+  status,
+  orderStatus,
+  paymentStatus,
 }: SubmitOrderInput): Promise<SubmitOrderResponse> {
   if (!tenantId) {
     throw new Error("tenantId is required to submit order.");
@@ -459,6 +467,11 @@ export async function submitOrder({
   const url = `${BRIDGE_API_URL}/api/v1/qr-orders`;
   const normalizedPaymentMethod = (paymentMethod || "CASHIER").toString().trim();
   const paymentReceiptUrl = resolvePaymentReceiptUrl(paymentReceipt);
+  const normalizedOrderId = orderId?.trim();
+  const normalizedStatus = (status || orderStatus || (normalizedOrderId ? "PREPARING" : "PENDING_PAYMENT")).toString().trim();
+  const normalizedPaymentStatus = (
+    paymentStatus || (normalizedOrderId ? "PAID" : "PENDING_PAYMENT")
+  ).toString().trim();
 
   const payload = {
     tenantId,
@@ -467,6 +480,8 @@ export async function submitOrder({
     table_id: tableId,
     branchId: branchId?.trim() || undefined,
     branch_id: branchId?.trim() || undefined,
+    orderId: normalizedOrderId || undefined,
+    order_id: normalizedOrderId || undefined,
     customerName: customerName?.trim() || undefined,
     customer_name: customerName?.trim() || undefined,
     items: cartItems.map((item) => ({
@@ -480,8 +495,16 @@ export async function submitOrder({
     totalAmount,
     notes: notes?.trim() || undefined,
     payment_method: normalizedPaymentMethod,
+    payment_method_name: normalizedPaymentMethod,
     paymentReceipt: paymentReceiptUrl,
     payment_receipt: paymentReceiptUrl,
+    status: normalizedStatus,
+    orderStatus: normalizedStatus,
+    paymentStatus: normalizedPaymentStatus,
+    payment_status: normalizedPaymentStatus,
+    enable_qris_ocr: false,
+    skip_ocr: true,
+    disable_ocr: true,
   };
 
   let response: Response;
@@ -498,6 +521,10 @@ export async function submitOrder({
       formData.append("branchId", branchId.trim());
       formData.append("branch_id", branchId.trim());
     }
+    if (normalizedOrderId) {
+      formData.append("orderId", normalizedOrderId);
+      formData.append("order_id", normalizedOrderId);
+    }
     if (customerName?.trim()) {
       formData.append("customerName", customerName.trim());
       formData.append("customer_name", customerName.trim());
@@ -508,10 +535,18 @@ export async function submitOrder({
       formData.append("notes", notes.trim());
     }
     formData.append("payment_method", normalizedPaymentMethod);
+    formData.append("payment_method_name", normalizedPaymentMethod);
     if (paymentReceiptUrl) {
       formData.append("paymentReceipt", paymentReceiptUrl);
       formData.append("payment_receipt", paymentReceiptUrl);
     }
+    formData.append("status", normalizedStatus);
+    formData.append("orderStatus", normalizedStatus);
+    formData.append("paymentStatus", normalizedPaymentStatus);
+    formData.append("payment_status", normalizedPaymentStatus);
+    formData.append("enable_qris_ocr", "false");
+    formData.append("skip_ocr", "true");
+    formData.append("disable_ocr", "true");
     formData.append("payment_proof", paymentProofFile);
 
     ({ response, json } = await fetchJson<SubmitOrderResponse>(
@@ -623,16 +658,7 @@ export async function getPublicSettings(
         : typeof allowFromRoot === "boolean"
         ? allowFromRoot
         : true,
-    isPaymentProofMandatory:
-      typeof mandatoryFromData === "boolean"
-        ? mandatoryFromData
-        : typeof mandatoryFromRoot === "boolean"
-        ? mandatoryFromRoot
-        : typeof ocrFromData === "boolean"
-        ? ocrFromData
-        : typeof ocrFromRoot === "boolean"
-        ? ocrFromRoot
-        : true,
+    isPaymentProofMandatory: false,
     receiptFooter,
   };
 }
