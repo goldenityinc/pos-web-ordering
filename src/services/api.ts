@@ -5,6 +5,8 @@ const BRIDGE_API_URL = (
   process.env.NEXT_PUBLIC_BRIDGE_API_URL?.trim() || DEFAULT_BRIDGE_API_URL
 ).replace(/\/$/, "");
 
+import { resolveOrderItemProductId } from "./order-utils.js";
+
 const NETWORK_WIFI_ERROR_MESSAGE =
   "Koneksi terhalang, mohon gunakan paket data atau cek koneksi internet Anda.";
 
@@ -489,7 +491,7 @@ export async function submitOrder({
     customerName: customerName?.trim() || undefined,
     customer_name: customerName?.trim() || undefined,
     items: cartItems.map((item) => ({
-      productId: item.product?.id ?? item.product_id ?? item.productId,
+      productId: resolveOrderItemProductId(item),
       quantity: item.quantity,
       price: item.price,
       name: item.name,

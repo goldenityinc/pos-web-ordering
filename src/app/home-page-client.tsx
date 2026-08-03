@@ -14,6 +14,7 @@ import {
   updateReceiptFooter,
   updateQrisImage,
 } from "../services/api";
+import { resolveOrderItemProductId } from "../services/order-utils.js";
 import { useCart } from "../contexts/cart-context";
 
 export const dynamic = "force-dynamic";
@@ -433,7 +434,11 @@ export default function HomePage({ forcedMode }: HomePageClientProps = {}) {
 
     try {
       const payloadItems: OrderItemInput[] = cartItems.map((item) => ({
-        productId: item.product?.id ?? item.product_id ?? item.productId,
+        productId: resolveOrderItemProductId(item as {
+          productId: string;
+          product?: { id?: string };
+          product_id?: string;
+        }),
         quantity: item.quantity,
         price: item.price,
         name: item.name,
