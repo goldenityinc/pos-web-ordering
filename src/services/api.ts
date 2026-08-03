@@ -66,6 +66,10 @@ export interface OrderItemInput {
   name?: string;
   subtotal?: number;
   note?: string;
+  product?: {
+    id?: string;
+  };
+  product_id?: string;
 }
 
 export interface SubmitOrderInput {
@@ -485,7 +489,7 @@ export async function submitOrder({
     customerName: customerName?.trim() || undefined,
     customer_name: customerName?.trim() || undefined,
     items: cartItems.map((item) => ({
-      productId: item.productId,
+      productId: item.product?.id ?? item.product_id ?? item.productId,
       quantity: item.quantity,
       price: item.price,
       name: item.name,

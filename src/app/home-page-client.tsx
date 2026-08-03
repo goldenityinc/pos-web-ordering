@@ -433,7 +433,7 @@ export default function HomePage({ forcedMode }: HomePageClientProps = {}) {
 
     try {
       const payloadItems: OrderItemInput[] = cartItems.map((item) => ({
-        productId: item.productId,
+        productId: item.product?.id ?? item.product_id ?? item.productId,
         quantity: item.quantity,
         price: item.price,
         name: item.name,
