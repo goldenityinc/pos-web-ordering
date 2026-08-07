@@ -237,6 +237,72 @@ export default function HomePage({ forcedMode }: HomePageClientProps = {}) {
     setIsMounted(true);
   }, []);
 
+  // 🔴 [CRITICAL FIX 2 - STALE CACHE LAMA DI MEJA BERBEDA]
+  //    User pindah dari Meja 3 (URL ...?tableId=3) ke Meja A1 (...?tableId=36)
+  //    Tapi localStorage ACTIVE_TX_ID_KEY masih bawa transactionId MEJA LAMA →
+  //    Order List Tab menampilkan data LAMA (trx lama / kosong items) → TIDAK BISA BAYAR.
+  //    Solusi: Compare URL current tableId/branchId/tenantId vs storedScope, jika TIDAK SAMA
+  //    → FORCE RESET SEMUA CACHE TRANSAKSI LAMA (scope = 1 browser tab 1 meja).
+  useEffect(() => {
+    if (!isMounted || !tenantId) return;
+    try {
+      const STORED_SCOPE_KEY = `${APP_STORAGE_PREFIX}currentSessionScope_v1`;
+      const currentScope = {
+        tenantId: tenantId.trim(),
+        branchId: branchId.trim(),
+        tableId: tableId.trim(),
+        tableNumber: tableNumber.trim(),
+      };
+      const scopeStr = JSON.stringify(currentScope);
+      const stored = safeGetStorage(STORED_SCOPE_KEY) || "";
+      const storedTxId = safeGetStorage(ACTIVE_TX_ID_KEY) || "";
+
+      const storedIsEmpty = stored === "" || stored === "{}";
+      const scopeMatches = !storedIsEmpty && stored === scopeStr;
+      const scopeTableChanged = !scopeMatches && storedTxId !== "";
+
+      if (scopeTableChanged || storedIsEmpty) {
+        if (storedTxId) {
+          safeRemoveStorage(buildOrdersStorageKey(storedTxId));
+          safeRemoveStorage(`${APP_STORAGE_PREFIX}paxCount_${storedTxId}`);
+          safeRemoveStorage(`${APP_STORAGE_PREFIX}customerName_${storedTxId}`);
+        }
+        safeRemoveStorage(ACTIVE_TX_ID_KEY);
+        safeRemoveStorage(ACTIVE_ORDER_IDX_KEY);
+        safeRemoveStorage(AWAITING_PAYMENT_KEY);
+        safeRemoveStorage(`${APP_STORAGE_PREFIX}lastPaymentTx`);
+        safeRemoveStorage(`${APP_STORAGE_PREFIX}qr_order_progress`);
+        try {
+          if (typeof localStorage !== "undefined" && localStorage && APP_STORAGE_PREFIX) {
+            const keysToDelete: string[] = [];
+            for (let i = 0; i < localStorage.length; i++) {
+              const key = localStorage.key(i);
+              if (key && key.startsWith(APP_STORAGE_PREFIX) && !key.endsWith("SETTINGS_v1") && !key.endsWith("FOOTER_v1") && !key.endsWith("QRIS_URL_v1")) {
+                if (key === STORED_SCOPE_KEY) continue;
+                keysToDelete.push(key);
+              }
+            }
+            for (const k of keysToDelete) {
+              try { localStorage.removeItem(k); } catch (_e) { /* ignore */ }
+            }
+          }
+        } catch (_e) { /* ignore */ }
+        setOrderList([]);
+        setIsAwaitingPaymentConfirmation(false);
+        setIsOrderSuccess(false);
+        setOrderReceipt(null);
+        setPendingOrderId("");
+        if (typeof clearCart === "function") {
+          try { clearCart(); } catch (_e) { /* ignore */ }
+        }
+      }
+      safeSetStorage(STORED_SCOPE_KEY, scopeStr);
+    } catch (_e) {
+      console.warn("[scope reset error]", _e);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isMounted, tenantId, branchId, tableId, tableNumber]);
+
   useEffect(() => {
     if (!tenantId) {
       setCategories([]);
@@ -521,6 +587,27 @@ export default function HomePage({ forcedMode }: HomePageClientProps = {}) {
                 ? (data as any).data
                 : null;
             if (orders) {
+              // 🔴 [FIX 3a] REMOVE stale cache entries: Bridge return hasil LOCAL dengan items LENGHT 0.
+              //    Hapus order dari storage yang items = [] tapi transactionId match (HINDARI
+              //    Order List Tab menampilkan data kosong → TIDAK BISA BAYAR karena totalAmount = 0).
+              const currentStored = loadOrdersForTransaction(txId) || [];
+              const purgeKeys = new Set<string>();
+              for (const upstream of orders) {
+                const subId = String(upstream.submissionId || "").trim() || "";
+                const hasItems = Array.isArray(upstream.items) && upstream.items.length > 0;
+                if (!subId) continue;
+                if (hasItems) purgeKeys.add(subId + "__KEEP_FRESH");
+              }
+              let shouldPurgeStorageTotal =
+                orders.length > 0 &&
+                orders.every(
+                  (o: any) =>
+                    Array.isArray(o.items) &&
+                    o.items.length === 0 &&
+                    (Number(o.subtotal) === 0 || Number(o.totalAmount) === 0 || Number(o.grandTotal) === 0),
+                ) &&
+                currentStored.some((o) => o.items && o.items.length > 0);
+              // Step 2: Normalize fresh
               const normalized: OrderRecord[] = (orders as any[]).map((o) => ({
                 submissionId:
                   String(o.submissionId || "").trim() || generateSubmissionId(),
@@ -531,26 +618,33 @@ export default function HomePage({ forcedMode }: HomePageClientProps = {}) {
                   (Array.isArray(o.items) ? o.items : []).map((it: any) => ({
                     productId: String(it.productId || it.product_id || ""),
                     name: String(it.name || ""),
-                    quantity: Number(it.quantity) || 0,
-                    price: Number(it.price) || 0,
+                    quantity: Number(it.quantity) || Number(it.qty) || 0,
+                    price: Number(it.price) || Number(it.harga_jual) || Number(it.unit_price) || 0,
                     subtotal:
                       Number(it.subtotal) ||
-                      Number(it.price) * Number(it.quantity) ||
+                      (Number(it.price) || 0) * (Number(it.quantity) || Number(it.qty) || 0) ||
                       0,
-                    note: it.note || undefined,
+                    note: it.note || it.special_note || undefined,
                     modifiers: Array.isArray(it.modifiers) ? it.modifiers : [],
                     variantNotes: Array.isArray(it.variantNotes)
                       ? it.variantNotes
                       : [],
                   })),
-                subtotal: Number(o.subtotal) || 0,
-                customerName: o.customerName || o.customer_name || undefined,
-                tableNumber: o.tableNumber || o.table || tableNumber,
-                tableId: o.tableId || undefined,
-                branchId: o.branchId || undefined,
-                tenantId: o.tenantId || tenantId,
+                subtotal:
+                  Number(o.subtotal) ||
+                  Number(o.grandTotal) ||
+                  Number(o.totalAmount) ||
+                  Number(o.total_amount) ||
+                  0,
+                customerName: o.customerName || o.customer_name || o.customer || undefined,
+                tableNumber: o.tableNumber || o.table_number || o.table || tableNumber,
+                tableId: o.tableId || o.table_id || undefined,
+                branchId: o.branchId || o.branch_id || undefined,
+                tenantId: o.tenantId || o.tenant_id || tenantId,
                 paymentMethod:
                   o.paymentMethod === "QRIS"
+                    ? "QRIS"
+                    : (o.paymentMethod && String(o.paymentMethod).toUpperCase() === "QRIS")
                     ? "QRIS"
                     : o.paymentMethod
                     ? "CASHIER"
@@ -564,10 +658,34 @@ export default function HomePage({ forcedMode }: HomePageClientProps = {}) {
                 ackStatus:
                   o.ackStatus || o.ack_status || "POS_ACKNOWLEDGED",
                 resolvedDeviceUuid: o.resolvedDeviceUuid || undefined,
-                orderNote: o.orderNote || o.notes || undefined,
+                orderNote: o.orderNote || o.notes || o.special_note || undefined,
               }));
-              writeLocalStorageJson(buildOrdersStorageKey(txId), normalized);
-              setOrderList(normalized);
+              // Step 3: Fresh data punya order BERISI items → override storage
+              const freshHasAnyItems = normalized.some((n) => n.items && n.items.length > 0);
+              if (freshHasAnyItems) {
+                writeLocalStorageJson(buildOrdersStorageKey(txId), normalized);
+                setOrderList(normalized);
+                setIsAwaitingPaymentConfirmation(true);
+                if (isMounted) safeSetStorage(AWAITING_PAYMENT_KEY, "1");
+              } else if (currentStored.length === 0 || shouldPurgeStorageTotal) {
+                // Step 4: Semua data kosong → purge empty stale
+                writeLocalStorageJson(buildOrdersStorageKey(txId), []);
+                setOrderList([]);
+              } else {
+                // Step 5: Gabung (merge) existing STORED yg sudah ada items dengan upstream
+                //          (upstream acak waktu empty karena Bridge cache baru di-setting)
+                const merged = [...currentStored];
+                for (const n of normalized) {
+                  const idx = merged.findIndex((m) => m.submissionId === n.submissionId);
+                  if (idx >= 0) {
+                    merged[idx] = { ...merged[idx], ...n, items: (n.items && n.items.length > 0 ? n.items : merged[idx].items) };
+                  } else {
+                    merged.push(n);
+                  }
+                }
+                writeLocalStorageJson(buildOrdersStorageKey(txId), merged);
+                setOrderList([...merged]);
+              }
             }
           }
         } catch (_e) {}
