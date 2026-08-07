@@ -835,14 +835,102 @@ export default function HomePage({ forcedMode }: HomePageClientProps = {}) {
   }, [cart, productById]);
 
   const sortedOrderList = useMemo(() => {
-    return [...orderList].sort((a, b) => b.orderIndex - a.orderIndex);
+    const seenSub = new Set<string>();
+    const deduped: Array<OrderRecord> = [];
+    for (const o of [...orderList].sort((a, b) => b.orderIndex - a.orderIndex)) {
+      const key = `${String(o.submissionId || "").trim()}|${String(o.orderIndex || 1)}|${String(o.transactionId || "").trim()}|${String(o.createdAt || "").trim()}|${(o.items || []).map((it) => `${it.productId}:${it.quantity}:${it.price}`).join(",")}`;
+      const sub = String(o.submissionId || "").trim();
+      if (sub && seenSub.has(sub)) continue;
+      if (sub) seenSub.add(sub);
+      else if (seenSub.has(key)) continue;
+      seenSub.add(key);
+      deduped.push(o);
+    }
+    return deduped;
   }, [orderList]);
 
   const totalOrderPayment = useMemo(() => {
-    return orderList.reduce((sum, o) => sum + (o.subtotal || 0), 0);
-  }, [orderList]);
+    return sortedOrderList.reduce((sum, o) => sum + (o.subtotal || 0), 0);
+  }, [sortedOrderList]);
 
-  const hasAnyOrder = orderList.length > 0;
+  // 🔴 [FIX 3 - QRIS PAID FLOW + HIDE BAYAR BUTTON JIKA SUDAH BAYAR]
+  // Aturan user exact:
+  //   a) BAYAR QRIS SUDAH DONE => Order TETAP MUNCUL di list (history) TAPI:
+  //      - HIDE TOMBOL BAYAR (disable click / set label SUDAH DIBAYAR)
+  //      - TTL MAX 30 MENIT (1800 detik) => auto clear storage expired
+  //   b) BAYAR DI KASIR (paymentMethod = CASHIER) => BELUM LUNAS => TOMBOL BAYAR TETAP ADA
+  const orderPaymentFlags = useMemo(() => {
+    let anyQrisPaid = false;
+    let anyCashierUnpaid = false;
+    let allPaid = sortedOrderList.length > 0;
+    let hasExpiredRows = false;
+    const nowMs = Date.now();
+    const TTL_MS = 30 * 60 * 1000; // 30 menit exact user request
+    for (const order of sortedOrderList) {
+      const pmRaw = String(order.paymentMethod || "").toUpperCase().trim();
+      const isQris = pmRaw === "QRIS";
+      const isCashier = pmRaw === "CASHIER" || pmRaw === "";
+      const ackStatus = String(order.ackStatus || "").toUpperCase().trim();
+      const isPaidFlag =
+        (order as unknown as { isPaid?: boolean; paid?: boolean }).isPaid === true ||
+        (order as unknown as { isPaid?: boolean; paid?: boolean }).paid === true;
+      let paid = false;
+      if (isQris) {
+        paid = isPaidFlag || ackStatus === "POS_PRINTED" || ackStatus === "PAID" || ackStatus === "COMPLETED" || ackStatus === "POS_ACKNOWLEDGED";
+        if (paid) anyQrisPaid = true;
+      } else if (isCashier) {
+        paid = isPaidFlag || ackStatus === "POS_PRINTED" || ackStatus === "COMPLETED";
+        if (!paid) anyCashierUnpaid = true;
+      }
+      if (!paid) allPaid = false;
+      const ts = order.createdAt ? new Date(order.createdAt).getTime() : 0;
+      if (ts && Number.isFinite(ts) && nowMs - ts > TTL_MS) {
+        hasExpiredRows = true;
+      }
+    }
+    return {
+      anyQrisPaid,
+      anyCashierUnpaid,
+      allPaid,
+      hasExpiredRows,
+      showPayButton: sortedOrderList.length === 0 || !allPaid,
+      allPaidViaQrisOnly: anyQrisPaid && !anyCashierUnpaid && allPaid,
+      statusLabel: (() => {
+        if (sortedOrderList.length === 0) return "";
+        if (anyQrisPaid && !anyCashierUnpaid && allPaid) return "✅ Sudah dibayar via QRIS";
+        if (allPaid) return "✅ Sudah lunas";
+        if (anyCashierUnpaid) return "⏳ Menunggu pembayaran di kasir";
+        if (anyQrisPaid) return "⏳ Sebagian dibayar QRIS";
+        return "⏳ Menunggu pembayaran";
+      })(),
+      TTL_MS,
+    };
+  }, [sortedOrderList]);
+
+  // 🔴 Auto-purge QRIS expired (> 30 menit) dari storage & orderList
+  useEffect(() => {
+    if (!isMounted || !activeTransactionId) return;
+    if (!orderPaymentFlags.hasExpiredRows) return;
+    const TTL_MS = orderPaymentFlags.TTL_MS;
+    const nowMs = Date.now();
+    const freshRows = orderList.filter((o) => {
+      const ts = o.createdAt ? new Date(o.createdAt).getTime() : 0;
+      return ts ? nowMs - ts <= TTL_MS : true;
+    });
+    if (freshRows.length !== orderList.length) {
+      setOrderList(freshRows);
+      writeLocalStorageJson(buildOrdersStorageKey(activeTransactionId), freshRows);
+      if (freshRows.length === 0) {
+        safeRemoveStorage(ACTIVE_TX_ID_KEY);
+        safeRemoveStorage(AWAITING_PAYMENT_KEY);
+        safeRemoveStorage(`${APP_STORAGE_PREFIX}paxCount_${activeTransactionId}`);
+        safeRemoveStorage(`${APP_STORAGE_PREFIX}customerName_${activeTransactionId}`);
+      }
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isMounted, activeTransactionId, orderPaymentFlags.hasExpiredRows]);
+
+  const hasAnyOrder = sortedOrderList.length > 0;
 
   const paxCountDisplay = isMounted
     ? safeGetStorage(`${APP_STORAGE_PREFIX}paxCount_${activeTransactionId}`) || ""
@@ -2032,17 +2120,39 @@ export default function HomePage({ forcedMode }: HomePageClientProps = {}) {
               <p className="text-lg font-extrabold text-slate-900">
                 {rupiahFormatter.format(totalOrderPayment)}
               </p>
+              {orderPaymentFlags.statusLabel ? (
+                <p
+                  className={`mt-1 text-xs font-bold ${
+                    orderPaymentFlags.allPaid
+                      ? "text-emerald-700"
+                      : "text-amber-700"
+                  }`}
+                >
+                  {orderPaymentFlags.statusLabel}
+                </p>
+              ) : null}
             </div>
-            <button
-              type="button"
-              onClick={handleBayarClick}
-              disabled={isAwaitingPaymentConfirmation}
-              className="rounded-2xl bg-emerald-600 px-6 py-3 text-sm font-extrabold text-white shadow-sm transition hover:bg-emerald-700 active:scale-[0.98] disabled:cursor-not-allowed disabled:opacity-60"
-            >
-              {isAwaitingPaymentConfirmation ? "MENUNGGU KASIR..." : "BAYAR"}
-            </button>
+            {orderPaymentFlags.showPayButton ? (
+              <button
+                type="button"
+                onClick={handleBayarClick}
+                disabled={isAwaitingPaymentConfirmation}
+                className="rounded-2xl bg-emerald-600 px-6 py-3 text-sm font-extrabold text-white shadow-sm transition hover:bg-emerald-700 active:scale-[0.98] disabled:cursor-not-allowed disabled:opacity-60"
+              >
+                {isAwaitingPaymentConfirmation ? "MENUNGGU KASIR..." : "BAYAR"}
+              </button>
+            ) : (
+              <div className="rounded-2xl bg-emerald-50 px-5 py-3 text-right ring-1 ring-emerald-200">
+                <p className="text-xs font-bold uppercase tracking-wide text-emerald-600">
+                  Sudah Lunas
+                </p>
+                <p className="text-sm font-extrabold text-emerald-800">
+                  ✅ {orderPaymentFlags.allPaidViaQrisOnly ? "QRIS PAID" : "LUNAS"}
+                </p>
+              </div>
+            )}
           </div>
-          {isAwaitingPaymentConfirmation ? (
+          {orderPaymentFlags.showPayButton && isAwaitingPaymentConfirmation ? (
             <div className="mt-2 flex items-center justify-between">
               <p className="text-xs text-amber-700">
                 ⏳ Silakan selesaikan di kasir.
@@ -2065,7 +2175,7 @@ export default function HomePage({ forcedMode }: HomePageClientProps = {}) {
           onClick={handleOpenCheckout}
           disabled={displayCartSummary.itemCount === 0}
           className={`fixed left-1/2 z-40 w-[calc(100%-2rem)] max-w-md -translate-x-1/2 rounded-2xl bg-slate-900 px-5 py-4 text-left text-white shadow-lg ring-1 ring-black/10 transition ${
-            activeTab === "orderList" && hasAnyOrder ? "bottom-20" : "bottom-4"
+            activeTab === "orderList" && hasAnyOrder ? (orderPaymentFlags.showPayButton ? "bottom-20" : "bottom-24") : "bottom-4"
           }`}
         >
           <p className="text-sm font-semibold">
