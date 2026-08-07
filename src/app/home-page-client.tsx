@@ -11,11 +11,23 @@ import {
   MenuProduct,
   OrderItemInput,
   submitOrder,
+  submitOrderWithPosQueueAck,
+  pollOrderAckStatus,
   updateReceiptFooter,
   updateQrisImage,
+  SubmitOrderResponse,
 } from "../services/api";
 import { resolveOrderItemProductId } from "../services/order-utils.js";
 import { useCart } from "../contexts/cart-context";
+import {
+  safeGetStorage,
+  safeSetStorage,
+  safeRemoveStorage,
+  safeParseLocalStorageJson,
+  writeLocalStorageJson,
+  removeLocalStorageKey,
+  APP_STORAGE_PREFIX,
+} from "../lib/app-storage";
 
 export const dynamic = "force-dynamic";
 
@@ -54,6 +66,65 @@ type OnlineReceiptSnapshot = {
   paymentProofUrl?: string;
   receiptUrl?: string;
   receiptFooter: string;
+};
+
+type AckStatusType =
+  | "PENDING_ACK"
+  | "POS_ACKNOWLEDGED"
+  | "POS_PRINTED"
+  | "FAILED_DELIVERY"
+  | "TIMEOUT"
+  | string;
+
+type OrderItemRecord = {
+  productId: string;
+  name: string;
+  quantity: number;
+  price: number;
+  subtotal: number;
+  note?: string;
+  modifiers?: string[];
+  variantNotes?: string[];
+};
+
+type OrderRecord = {
+  submissionId: string;
+  orderId?: string;
+  orderIndex: number;
+  transactionId: string;
+  items: OrderItemRecord[];
+  subtotal: number;
+  customerName?: string;
+  tableNumber: string;
+  tableId?: string;
+  branchId?: string;
+  tenantId: string;
+  paymentMethod?: "CASHIER" | "QRIS";
+  createdAt: string;
+  receiptNumber?: string;
+  ackStatus: AckStatusType;
+  resolvedDeviceUuid?: string;
+  orderNote?: string;
+};
+
+type QueueScreenState = {
+  isOpen: boolean;
+  progressPct: number;
+  stageMessage: string;
+  etaSeconds?: number;
+  isFailed: boolean;
+  failureMessage?: string;
+  submissionId?: string;
+  transactionId?: string;
+  queuePosition?: number;
+  queueTotal?: number;
+  retryPayload?: Parameters<typeof submitOrderWithPosQueueAck>[0];
+};
+
+type SnackbarState = {
+  isOpen: boolean;
+  message: string;
+  type: "success" | "error" | "info";
 };
 
 type HomePageClientProps = {
@@ -142,6 +213,25 @@ export default function HomePage({ forcedMode }: HomePageClientProps = {}) {
   const [isOrderSuccess, setIsOrderSuccess] = useState(false);
   const [orderReceipt, setOrderReceipt] = useState<OnlineReceiptSnapshot | null>(null);
   const [pendingOrderId, setPendingOrderId] = useState("");
+
+  const [queueScreen, setQueueScreen] = useState<QueueScreenState>({
+    isOpen: false,
+    progressPct: 0,
+    stageMessage: "",
+    etaSeconds: undefined,
+    isFailed: false,
+  });
+  const [snackbar, setSnackbar] = useState<SnackbarState>({
+    isOpen: false,
+    message: "",
+    type: "info",
+  });
+  const [activeTab, setActiveTab] = useState<"menu" | "orderList">("menu");
+  const [orderList, setOrderList] = useState<OrderRecord[]>([]);
+  const [paxCountInput, setPaxCountInput] = useState<number | "">("");
+  const [isPaymentMethodModalOpen, setIsPaymentMethodModalOpen] = useState(false);
+  const [isAwaitingPaymentConfirmation, setIsAwaitingPaymentConfirmation] = useState(false);
+  const [orderListPollingToken, setOrderListPollingToken] = useState(0);
 
   useEffect(() => {
     setIsMounted(true);
@@ -261,6 +351,217 @@ export default function HomePage({ forcedMode }: HomePageClientProps = {}) {
 
     void run();
   }, [branchId, isCheckoutOpen, isSettingsMode, tenantId]);
+
+  const ACTIVE_TX_ID_KEY = `${APP_STORAGE_PREFIX}activeTransactionId`;
+  const ACTIVE_ORDER_IDX_KEY = `${APP_STORAGE_PREFIX}activeOrderIndex`;
+  const AWAITING_PAYMENT_KEY = `${APP_STORAGE_PREFIX}awaitingPayment`;
+
+  const buildOrdersStorageKey = (txId: string) =>
+    `${APP_STORAGE_PREFIX}orders_transaction_${txId}`;
+
+  const getOrCreateTransactionId = (): string => {
+    if (!isMounted) return "";
+    const existing = safeGetStorage(ACTIVE_TX_ID_KEY);
+    if (existing && existing.trim()) {
+      return existing.trim();
+    }
+    const newId = `TX-${Date.now()}`;
+    safeSetStorage(ACTIVE_TX_ID_KEY, newId);
+    return newId;
+  };
+
+  const getNextOrderIndex = (): number => {
+    if (!isMounted) return 1;
+    const raw = safeGetStorage(ACTIVE_ORDER_IDX_KEY);
+    const parsed = raw ? Number(raw) : NaN;
+    if (Number.isFinite(parsed) && parsed >= 1) {
+      return Math.floor(parsed);
+    }
+    safeSetStorage(ACTIVE_ORDER_IDX_KEY, "1");
+    return 1;
+  };
+
+  const incrementOrderIndex = (): void => {
+    if (!isMounted) return;
+    const current = getNextOrderIndex();
+    safeSetStorage(ACTIVE_ORDER_IDX_KEY, String(current + 1));
+  };
+
+  const clearTransactionContext = (): void => {
+    if (!isMounted) return;
+    const txId = safeGetStorage(ACTIVE_TX_ID_KEY);
+    safeRemoveStorage(ACTIVE_TX_ID_KEY);
+    safeRemoveStorage(ACTIVE_ORDER_IDX_KEY);
+    safeRemoveStorage(AWAITING_PAYMENT_KEY);
+    if (txId) {
+      safeRemoveStorage(buildOrdersStorageKey(txId));
+    }
+  };
+
+  const loadOrdersForTransaction = (txId: string): OrderRecord[] => {
+    if (!txId || !isMounted) return [];
+    return safeParseLocalStorageJson<OrderRecord[]>(
+      buildOrdersStorageKey(txId),
+      [],
+    );
+  };
+
+  const saveOrderToTransaction = (txId: string, order: OrderRecord): void => {
+    if (!txId || !isMounted) return;
+    const existing = loadOrdersForTransaction(txId);
+    const idx = existing.findIndex((o) => o.submissionId === order.submissionId);
+    if (idx >= 0) {
+      existing[idx] = order;
+    } else {
+      existing.push(order);
+    }
+    writeLocalStorageJson(buildOrdersStorageKey(txId), existing);
+    setOrderList(existing);
+  };
+
+  const patchOrderInList = (
+    txId: string,
+    submissionId: string,
+    patch: Partial<OrderRecord>,
+  ): void => {
+    if (!txId || !submissionId || !isMounted) return;
+    const existing = loadOrdersForTransaction(txId);
+    const idx = existing.findIndex((o) => o.submissionId === submissionId);
+    if (idx >= 0) {
+      existing[idx] = { ...existing[idx], ...patch };
+      writeLocalStorageJson(buildOrdersStorageKey(txId), existing);
+      setOrderList([...existing]);
+    }
+  };
+
+  const showSnackbar = (message: string, type: "success" | "error" | "info" = "info") => {
+    setSnackbar({ isOpen: true, message, type });
+  };
+
+  const closeSnackbar = () => {
+    setSnackbar((s) => ({ ...s, isOpen: false }));
+  };
+
+  const generateSubmissionId = (): string => {
+    try {
+      if (
+        typeof crypto !== "undefined" &&
+        crypto &&
+        "randomUUID" in crypto
+      ) {
+        return (crypto as Crypto).randomUUID();
+      }
+    } catch (_) {}
+    return `sub-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+  };
+
+  useEffect(() => {
+    if (!snackbar.isOpen) return;
+    const t = setTimeout(() => {
+      setSnackbar((s) => ({ ...s, isOpen: false }));
+    }, 3500);
+    return () => clearTimeout(t);
+  }, [snackbar.isOpen, snackbar.message]);
+
+  useEffect(() => {
+    if (!isMounted) return;
+    const txId = safeGetStorage(ACTIVE_TX_ID_KEY);
+    if (txId) {
+      const orders = loadOrdersForTransaction(txId);
+      setOrderList(orders);
+    }
+    const awaiting = safeGetStorage(AWAITING_PAYMENT_KEY);
+    setIsAwaitingPaymentConfirmation(Boolean(awaiting && awaiting === "1"));
+  }, [isMounted, tenantId, orderListPollingToken]);
+
+  useEffect(() => {
+    if (!isMounted) return;
+    const txId = safeGetStorage(ACTIVE_TX_ID_KEY);
+    if (!txId) return;
+
+    const interval = setInterval(() => {
+      (async () => {
+        try {
+          const url = new URL(
+            `/api/v1/orders/by-transaction/${encodeURIComponent(txId)}`,
+            process.env.NEXT_PUBLIC_BRIDGE_API_URL?.trim() ||
+              "https://goldenity-pos-api-bridge-production.up.railway.app",
+          );
+          url.searchParams.set("tenantId", tenantId);
+          if (branchId?.trim()) {
+            url.searchParams.set("branchId", branchId.trim());
+          }
+          const resp = await fetch(url.toString(), {
+            method: "GET",
+            headers: { "Content-Type": "application/json" },
+            cache: "no-store",
+          });
+          if (resp.ok) {
+            const data = await resp.json();
+            const orders =
+              data && Array.isArray(data)
+                ? data
+                : data && Array.isArray((data as any).data)
+                ? (data as any).data
+                : null;
+            if (orders) {
+              const normalized: OrderRecord[] = (orders as any[]).map((o) => ({
+                submissionId:
+                  String(o.submissionId || "").trim() || generateSubmissionId(),
+                orderId: o.orderId ?? o.id ?? undefined,
+                orderIndex: Number(o.orderIndex) || 1,
+                transactionId: o.transactionId || txId,
+                items:
+                  (Array.isArray(o.items) ? o.items : []).map((it: any) => ({
+                    productId: String(it.productId || it.product_id || ""),
+                    name: String(it.name || ""),
+                    quantity: Number(it.quantity) || 0,
+                    price: Number(it.price) || 0,
+                    subtotal:
+                      Number(it.subtotal) ||
+                      Number(it.price) * Number(it.quantity) ||
+                      0,
+                    note: it.note || undefined,
+                    modifiers: Array.isArray(it.modifiers) ? it.modifiers : [],
+                    variantNotes: Array.isArray(it.variantNotes)
+                      ? it.variantNotes
+                      : [],
+                  })),
+                subtotal: Number(o.subtotal) || 0,
+                customerName: o.customerName || o.customer_name || undefined,
+                tableNumber: o.tableNumber || o.table || tableNumber,
+                tableId: o.tableId || undefined,
+                branchId: o.branchId || undefined,
+                tenantId: o.tenantId || tenantId,
+                paymentMethod:
+                  o.paymentMethod === "QRIS"
+                    ? "QRIS"
+                    : o.paymentMethod
+                    ? "CASHIER"
+                    : undefined,
+                createdAt:
+                  o.createdAt ||
+                  o.created_at ||
+                  new Date().toISOString(),
+                receiptNumber:
+                  o.receiptNumber || o.receipt_number || undefined,
+                ackStatus:
+                  o.ackStatus || o.ack_status || "POS_ACKNOWLEDGED",
+                resolvedDeviceUuid: o.resolvedDeviceUuid || undefined,
+                orderNote: o.orderNote || o.notes || undefined,
+              }));
+              writeLocalStorageJson(buildOrdersStorageKey(txId), normalized);
+              setOrderList(normalized);
+            }
+          }
+        } catch (_e) {}
+      })();
+    }, 10000);
+
+    return () => clearInterval(interval);
+  }, [isMounted, tenantId, branchId]);
+
+  const activeTransactionId = isMounted ? safeGetStorage(ACTIVE_TX_ID_KEY) || "" : "";
 
   const productById = useMemo(() => {
     return new Map(products.map((product) => [product.id, product]));
@@ -399,6 +700,164 @@ export default function HomePage({ forcedMode }: HomePageClientProps = {}) {
     return rows;
   }, [cart, productById]);
 
+  const sortedOrderList = useMemo(() => {
+    return [...orderList].sort((a, b) => b.orderIndex - a.orderIndex);
+  }, [orderList]);
+
+  const totalOrderPayment = useMemo(() => {
+    return orderList.reduce((sum, o) => sum + (o.subtotal || 0), 0);
+  }, [orderList]);
+
+  const hasAnyOrder = orderList.length > 0;
+
+  const paxCountDisplay = isMounted
+    ? safeGetStorage(`${APP_STORAGE_PREFIX}paxCount_${activeTransactionId}`) || ""
+    : "";
+
+  const handleRetryOrderCard = async (submissionId: string) => {
+    const order = orderList.find((o) => o.submissionId === submissionId);
+    if (!order) return;
+    const txId = order.transactionId || activeTransactionId || getOrCreateTransactionId();
+
+    const itemsPayload: OrderItemInput[] = order.items.map((it) => ({
+      productId: it.productId,
+      quantity: it.quantity,
+      price: it.price,
+      name: it.name,
+      subtotal: it.subtotal,
+      note: it.note,
+    }));
+
+    const submitPayload: Parameters<typeof submitOrderWithPosQueueAck>[0] = {
+      tenantId: order.tenantId || tenantId,
+      table: order.tableNumber || tableNumber,
+      tableNumber: order.tableNumber || tableNumber,
+      tableId: order.tableId || tableId,
+      branchId: order.branchId || branchId,
+      cartItems: itemsPayload,
+      items: itemsPayload,
+      totalAmount: order.subtotal,
+      customerName: order.customerName,
+      paymentMethod: order.paymentMethod || "CASHIER",
+      paymentProofFile: null,
+      orderNote: order.orderNote || "",
+      submissionId: order.submissionId,
+      transactionId: txId,
+      orderIndex: order.orderIndex,
+    };
+
+    setQueueScreen({
+      isOpen: true,
+      progressPct: 5,
+      stageMessage: "Mengirim ulang pesanan...",
+      etaSeconds: 35,
+      isFailed: false,
+      submissionId: order.submissionId,
+      transactionId: txId,
+      retryPayload: submitPayload,
+    });
+    setIsSubmitting(true);
+
+    try {
+      const response = await submitOrderWithPosQueueAck({
+        ...submitPayload,
+        onProgress: (pct, stage, etaSec) => {
+          setQueueScreen((prev) => ({
+            ...prev,
+            progressPct: pct,
+            stageMessage: stage,
+            etaSeconds: etaSec ?? prev.etaSeconds,
+          }));
+        },
+      });
+
+      if (response.success && (response.ackStatus === "POS_PRINTED" || response.ackStatus === "POS_ACKNOWLEDGED")) {
+        patchOrderInList(txId, submissionId, {
+          ackStatus: response.ackStatus || "POS_PRINTED",
+          orderId: response.orderId ? String(response.orderId) : undefined,
+          receiptNumber: response.receiptNumber,
+          resolvedDeviceUuid: response.resolvedDeviceUuid,
+        });
+        setTimeout(() => {
+          setQueueScreen((prev) => ({ ...prev, isOpen: false }));
+        }, 800);
+        showSnackbar("Pesanan berhasil terkirim ke dapur!", "success");
+      } else {
+        setQueueScreen((prev) => ({
+          ...prev,
+          isFailed: true,
+          failureMessage:
+            response.error ||
+            response.message ||
+            "Perangkat kasir tidak merespon.",
+          retryPayload: submitPayload,
+          progressPct: 0,
+        }));
+        patchOrderInList(txId, submissionId, {
+          ackStatus: response.ackStatus || "FAILED_DELIVERY",
+        });
+      }
+    } catch (err) {
+      setQueueScreen((prev) => ({
+        ...prev,
+        isFailed: true,
+        failureMessage: err instanceof Error ? err.message : "Gagal mengirim ulang.",
+        retryPayload: submitPayload,
+      }));
+    } finally {
+      setIsSubmitting(false);
+    }
+  };
+
+  const handleBayarClick = () => {
+    if (!hasAnyOrder) return;
+    if (allowPayAtCashier && qrisImageUrl) {
+      setIsPaymentMethodModalOpen(true);
+    } else if (qrisImageUrl && !allowPayAtCashier) {
+      setIsPaymentMethodModalOpen(false);
+      if (isMounted) safeSetStorage(AWAITING_PAYMENT_KEY, "0");
+      setIsQrisFlowOpen(true);
+    } else {
+      setIsPaymentMethodModalOpen(false);
+      if (isMounted) safeSetStorage(AWAITING_PAYMENT_KEY, "1");
+      setIsAwaitingPaymentConfirmation(true);
+      showSnackbar("Silakan selesaikan pembayaran di kasir.", "info");
+    }
+  };
+
+  const handlePaymentMethodSelected = (method: "QRIS" | "CASHIER") => {
+    setIsPaymentMethodModalOpen(false);
+    if (method === "QRIS") {
+      if (isMounted) safeSetStorage(AWAITING_PAYMENT_KEY, "0");
+      setIsQrisFlowOpen(true);
+    } else {
+      if (isMounted) safeSetStorage(AWAITING_PAYMENT_KEY, "1");
+      setIsAwaitingPaymentConfirmation(true);
+      showSnackbar("Silakan selesaikan pembayaran di kasir. Meja akan otomatis bersih setelah kasir mengonfirmasi.", "info");
+    }
+  };
+
+  const handleRefreshOrderList = () => {
+    setOrderListPollingToken((t) => t + 1);
+    showSnackbar("Memperbarui daftar pesanan...", "info");
+  };
+
+  const handleCompletePaymentSuccess = () => {
+    clearTransactionContext();
+    clearCart();
+    setOrderList([]);
+    setIsAwaitingPaymentConfirmation(false);
+    setIsQrisFlowOpen(false);
+    setIsCheckoutOpen(false);
+    setActiveTab("menu");
+    setCustomerNameInput("");
+    setPaymentMethod("CASHIER");
+    setPendingOrderId("");
+    setOrderReceipt(null);
+    setIsOrderSuccess(false);
+    showSnackbar("Pembayaran berhasil, terima kasih!", "success");
+  };
+
   const handleOpenCheckout = () => {
     if (cartSummary.itemCount === 0) {
       return;
@@ -415,10 +874,30 @@ export default function HomePage({ forcedMode }: HomePageClientProps = {}) {
     setIsCheckoutOpen(false);
   };
 
-  const handleSubmitOrder = async (
+  const readFileAsDataUrlGeneric = (file: File): Promise<string> => {
+    return new Promise<string>((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onload = () => {
+        const result = reader.result;
+        if (typeof result === "string") {
+          resolve(result);
+          return;
+        }
+        reject(new Error("Gagal membaca file."));
+      };
+      reader.onerror = () => reject(new Error("Gagal membaca file."));
+      reader.readAsDataURL(file);
+    });
+  };
+
+  const handleSubmitOrderWithQueue = async (
     selectedPaymentMethod: "CASHIER" | "QRIS",
     selectedProofFile?: File | null,
+    overrideSubmissionId?: string,
   ) => {
+    // 🔴 GUARD CLAUSE PALING ATAS - MENCEGAH DOUBLE CLICK / SPAM
+    if (isSubmitting) return;
+
     if (!tenantId) {
       setSubmitError("Tenant tidak ditemukan pada URL.");
       return;
@@ -429,135 +908,245 @@ export default function HomePage({ forcedMode }: HomePageClientProps = {}) {
       return;
     }
 
+    // 🔴 SET isSubmitting TRUE SEKARANG JUGA — SEBELUM generate submissionId
+    //    Agar tidak ada window race condition dimana klik 2x cepat
+    //    menghasilkan 2 UUID berbeda sebelum state sempat ter-update.
     setIsSubmitting(true);
     setSubmitError(null);
 
-    try {
-      const payloadItems: OrderItemInput[] = cartItems.map((item) => ({
-        productId: resolveOrderItemProductId(item as {
-          productId: string;
-          product?: { id?: string };
-          product_id?: string;
-        }),
-        quantity: item.quantity,
-        price: item.price,
-        name: item.name,
-        subtotal: item.subtotal,
-        note: item.note,
-      }));
+    const submissionId = overrideSubmissionId?.trim() || generateSubmissionId();
+    const transactionId = getOrCreateTransactionId();
+    const orderIndex = getNextOrderIndex();
+    const paxCount = typeof paxCountInput === "number" ? paxCountInput : undefined;
 
-      const isCompletingExistingOrder = Boolean(pendingOrderId) || Boolean(selectedProofFile);
-      const response = await submitOrder({
-        tenantId,
-        table: tableNumber,
-        tableId,
-        branchId,
-        cartItems: payloadItems,
-        totalAmount: cartSummary.total,
-        customerName: customerNameInput,
-        paymentMethod: selectedPaymentMethod,
-        paymentProofFile: selectedProofFile || null,
-        orderId: pendingOrderId || undefined,
-        status: isCompletingExistingOrder ? "PREPARING" : "PENDING_PAYMENT",
-        orderStatus: isCompletingExistingOrder ? "PREPARING" : "PENDING_PAYMENT",
-        paymentStatus: isCompletingExistingOrder ? "PAID" : "PENDING_PAYMENT",
+    if (typeof paxCountInput === "number" && isMounted) {
+      safeSetStorage(
+        `${APP_STORAGE_PREFIX}paxCount_${transactionId}`,
+        String(paxCountInput),
+      );
+    }
+
+    let paymentProofImageBase64: string | undefined;
+    if (selectedProofFile) {
+      try {
+        paymentProofImageBase64 = await readFileAsDataUrlGeneric(selectedProofFile);
+      } catch (_e) {}
+    }
+
+    const payloadItems: OrderItemInput[] = cartItems.map((item) => ({
+      productId: resolveOrderItemProductId(item as {
+        productId: string;
+        product?: { id?: string };
+        product_id?: string;
+      }),
+      quantity: item.quantity,
+      price: item.price,
+      name: item.name,
+      subtotal: item.subtotal,
+      note: item.note,
+    }));
+
+    const submitPayload: Parameters<typeof submitOrderWithPosQueueAck>[0] = {
+      tenantId,
+      table: tableNumber,
+      tableNumber,
+      tableId,
+      branchId,
+      cartItems: payloadItems,
+      items: payloadItems,
+      totalAmount: cartSummary.total,
+      customerName: customerNameInput,
+      paymentMethod: selectedPaymentMethod,
+      paymentProofFile: selectedProofFile || null,
+      paymentProofImageBase64,
+      orderNote: "",
+      submissionId,
+      paxCount,
+      transactionId,
+      orderIndex,
+    };
+
+    setQueueScreen({
+      isOpen: true,
+      progressPct: 0,
+      stageMessage: "Menyiapkan pesanan...",
+      etaSeconds: 35,
+      isFailed: false,
+      submissionId,
+      transactionId,
+      retryPayload: submitPayload,
+    });
+
+    try {
+      const response = await submitOrderWithPosQueueAck({
+        ...submitPayload,
+        onProgress: (pct, stage, etaSec) => {
+          setQueueScreen((prev) => ({
+            ...prev,
+            progressPct: pct,
+            stageMessage: stage,
+            etaSeconds: etaSec ?? prev.etaSeconds,
+          }));
+        },
       });
 
-      const responseData =
-        response && typeof response === "object" && response.data && typeof response.data === "object"
-          ? (response.data as Record<string, unknown>)
-          : (response as unknown as Record<string, unknown>);
+      if (response.success && (response.ackStatus === "POS_PRINTED" || response.ackStatus === "POS_ACKNOWLEDGED")) {
+        const orderRecord: OrderRecord = {
+          submissionId,
+          orderId: response.orderId ? String(response.orderId) : undefined,
+          orderIndex,
+          transactionId,
+          items: cartItems.map((item) => ({
+            productId: item.productId,
+            name: item.name,
+            quantity: item.quantity,
+            price: item.price,
+            subtotal: item.subtotal,
+            note: item.note,
+            modifiers: [],
+            variantNotes: item.note ? [item.note] : [],
+          })),
+          subtotal: cartSummary.total,
+          customerName: customerNameInput.trim() || undefined,
+          tableNumber,
+          tableId: tableId || undefined,
+          branchId: branchId || undefined,
+          tenantId,
+          paymentMethod: selectedPaymentMethod,
+          createdAt: new Date().toISOString(),
+          receiptNumber: response.receiptNumber,
+          ackStatus: response.ackStatus || "POS_PRINTED",
+          resolvedDeviceUuid: response.resolvedDeviceUuid,
+        };
+        saveOrderToTransaction(transactionId, orderRecord);
+        incrementOrderIndex();
 
-      const receiptNumber =
-        String(
-          responseData.receipt_number ??
-            responseData.receiptNumber ??
-            responseData.invoice_number ??
-            responseData.invoiceNumber ??
-            "",
-        ).trim();
+        setQueueScreen((prev) => ({
+          ...prev,
+          progressPct: 100,
+          stageMessage: "Pesanan berhasil terkirim!",
+          isFailed: false,
+        }));
 
-      const responseOrderId = String(
-        responseData.id ?? responseData.orderId ?? responseData.order_id ?? response.orderId ?? "",
-      ).trim();
+        setOrderReceipt({
+          orderId: response.orderId ? String(response.orderId) : "",
+          receiptNumber: response.receiptNumber || "",
+          createdAt: new Date().toISOString(),
+          customerName: customerNameInput.trim() || "Guest",
+          tenantName: tenantName || "Customer Ordering",
+          tableNumber,
+          branchName: branchInfo?.name || branchNameFromUrl || "-",
+          paymentMethod: selectedPaymentMethod === "QRIS" ? "QRIS" : "Bayar di Kasir",
+          totalAmount: cartSummary.total,
+          items: cartItems.map((item) => ({
+            name: item.name,
+            quantity: item.quantity,
+            price: item.price,
+            subtotal: item.subtotal,
+            note: item.note,
+          })),
+          paymentProofUrl: undefined,
+          receiptUrl: undefined,
+          receiptFooter: settingsReceiptFooter.trim() || DEFAULT_RECEIPT_FOOTER,
+        });
 
-      if (!isCompletingExistingOrder) {
-        if (responseOrderId) {
-          setPendingOrderId(responseOrderId);
-        }
-
-        if (selectedPaymentMethod === "CASHIER") {
-          const paymentMethodLabel = "Bayar di Kasir";
-          setOrderReceipt({
-            orderId: responseOrderId,
-            receiptNumber,
-            createdAt: new Date().toISOString(),
-            customerName: customerNameInput.trim() || "Guest",
-            tenantName: tenantName || "Customer Ordering",
-            tableNumber,
-            branchName: branchInfo?.name || branchNameFromUrl || "-",
-            paymentMethod: paymentMethodLabel,
-            totalAmount: cartSummary.total,
-            items: cartItems.map((item) => ({
-              name: item.name,
-              quantity: item.quantity,
-              price: item.price,
-              subtotal: item.subtotal,
-              note: item.note,
-            })),
-            paymentProofUrl: getUrlFromUnknown(
-              responseData.payment_proof_url ?? responseData.paymentProofUrl,
-            ),
-            receiptUrl: getUrlFromUnknown(responseData.receipt_url ?? responseData.receiptUrl),
-            receiptFooter: settingsReceiptFooter.trim() || DEFAULT_RECEIPT_FOOTER,
-          });
+        setTimeout(() => {
+          setQueueScreen((prev) => ({ ...prev, isOpen: false }));
+          setIsCheckoutOpen(false);
           setIsOrderSuccess(true);
-          setIsQrisFlowOpen(false);
+          setActiveTab("orderList");
           clearCart();
-        } else {
-          setIsQrisFlowOpen(true);
-        }
+        }, 800);
+
+        showSnackbar("Pesanan berhasil terkirim ke dapur!", "success");
         return;
       }
 
-      const paymentMethodLabel =
-        selectedPaymentMethod === "QRIS" ? "QRIS" : "Bayar di Kasir";
+      setQueueScreen((prev) => ({
+        ...prev,
+        isFailed: true,
+        failureMessage:
+          response.error ||
+          response.message ||
+          "Perangkat kasir tidak merespon dalam 30 detik.",
+        submissionId: response.submissionId || prev.submissionId,
+        retryPayload: submitPayload,
+        progressPct: 0,
+      }));
 
-      setPendingOrderId("");
-      setOrderReceipt({
-        orderId: responseOrderId || pendingOrderId,
-        receiptNumber,
-        createdAt: new Date().toISOString(),
-        customerName: customerNameInput.trim() || "Guest",
-        tenantName: tenantName || "Customer Ordering",
-        tableNumber,
-        branchName: branchInfo?.name || branchNameFromUrl || "-",
-        paymentMethod: paymentMethodLabel,
-        totalAmount: cartSummary.total,
-        items: cartItems.map((item) => ({
-          name: item.name,
-          quantity: item.quantity,
-          price: item.price,
-          subtotal: item.subtotal,
-          note: item.note,
-        })),
-        paymentProofUrl: getUrlFromUnknown(
-          responseData.payment_proof_url ?? responseData.paymentProofUrl,
-        ),
-        receiptUrl: getUrlFromUnknown(responseData.receipt_url ?? responseData.receiptUrl),
-        receiptFooter: settingsReceiptFooter.trim() || DEFAULT_RECEIPT_FOOTER,
-      });
-
-      setIsOrderSuccess(true);
-      setIsQrisFlowOpen(false);
-      clearCart();
+      if (response.ackStatus !== "POS_PRINTED" && response.ackStatus !== "POS_ACKNOWLEDGED") {
+        const failedOrder: OrderRecord = {
+          submissionId: response.submissionId || submissionId,
+          orderId: response.orderId ? String(response.orderId) : undefined,
+          orderIndex,
+          transactionId,
+          items: cartItems.map((item) => ({
+            productId: item.productId,
+            name: item.name,
+            quantity: item.quantity,
+            price: item.price,
+            subtotal: item.subtotal,
+            note: item.note,
+            modifiers: [],
+            variantNotes: item.note ? [item.note] : [],
+          })),
+          subtotal: cartSummary.total,
+          customerName: customerNameInput.trim() || undefined,
+          tableNumber,
+          tableId: tableId || undefined,
+          branchId: branchId || undefined,
+          tenantId,
+          paymentMethod: selectedPaymentMethod,
+          createdAt: new Date().toISOString(),
+          receiptNumber: response.receiptNumber,
+          ackStatus: response.ackStatus || "TIMEOUT",
+          resolvedDeviceUuid: response.resolvedDeviceUuid,
+        };
+        saveOrderToTransaction(transactionId, failedOrder);
+      }
     } catch (err) {
-      const message =
-        err instanceof Error ? err.message : "Gagal mengirim pesanan.";
-      setSubmitError(message);
+      setQueueScreen((prev) => ({
+        ...prev,
+        isFailed: true,
+        failureMessage: err instanceof Error ? err.message : "Terjadi kesalahan tak terduga.",
+        retryPayload: submitPayload,
+      }));
     } finally {
       setIsSubmitting(false);
     }
+  };
+
+  const handleRetryFailedOrder = async () => {
+    if (!queueScreen.retryPayload) {
+      setQueueScreen((prev) => ({ ...prev, isOpen: false }));
+      return;
+    }
+    const subId = queueScreen.submissionId;
+    setQueueScreen((prev) => ({
+      ...prev,
+      isFailed: false,
+      progressPct: 5,
+      stageMessage: "Mengirim ulang pesanan...",
+      failureMessage: undefined,
+    }));
+    await handleSubmitOrderWithQueue(
+      queueScreen.retryPayload.paymentMethod === "QRIS" ? "QRIS" : "CASHIER",
+      queueScreen.retryPayload.paymentProofFile || null,
+      subId,
+    );
+  };
+
+  const handleCloseQueueScreen = () => {
+    if (isSubmitting) return;
+    setQueueScreen((prev) => ({ ...prev, isOpen: false }));
+  };
+
+  const handleSubmitOrder = async (
+    selectedPaymentMethod: "CASHIER" | "QRIS",
+    selectedProofFile?: File | null,
+  ) => {
+    if (isSubmitting) return;
+    await handleSubmitOrderWithQueue(selectedPaymentMethod, selectedProofFile);
   };
 
   const handleProofFileChange = (file: File | null) => {
@@ -672,6 +1261,9 @@ export default function HomePage({ forcedMode }: HomePageClientProps = {}) {
   };
 
   const handlePrimaryCheckoutAction = () => {
+    // 🔴 GUARD CLAUSE FIRST LINE — CEGAH SPAM KLIK
+    if (isSubmitting) return;
+
     if (!allowPayAtCashier) {
       setPaymentMethod("QRIS");
       setIsQrisFlowOpen(true);
@@ -925,11 +1517,211 @@ export default function HomePage({ forcedMode }: HomePageClientProps = {}) {
           </div>
         ) : null}
 
+        {!isSettingsOnlyMode && !isSettingsMode ? (
+          <div className="mt-4 sticky top-3 z-10 rounded-2xl bg-white/90 shadow-sm ring-1 ring-orange-100 backdrop-blur overflow-hidden">
+            <div className="grid grid-cols-2">
+              <button
+                type="button"
+                onClick={() => setActiveTab("menu")}
+                className={`px-3 py-3 text-sm font-bold transition ${
+                  activeTab === "menu"
+                    ? "bg-orange-500 text-white"
+                    : "text-slate-600 hover:bg-slate-100"
+                }`}
+              >
+                🍽️ Menu
+              </button>
+              <button
+                type="button"
+                onClick={() => setActiveTab("orderList")}
+                className={`px-3 py-3 text-sm font-bold transition relative ${
+                  activeTab === "orderList"
+                    ? "bg-orange-500 text-white"
+                    : "text-slate-600 hover:bg-slate-100"
+                }`}
+              >
+                📋 Order List
+                {orderList.length > 0 ? (
+                  <span className={`absolute top-1.5 right-3 inline-flex h-5 min-w-5 items-center justify-center rounded-full px-1.5 text-[10px] font-extrabold ${
+                    activeTab === "orderList" ? "bg-white text-orange-600" : "bg-orange-500 text-white"
+                  }`}>
+                    {orderList.length}
+                  </span>
+                ) : null}
+              </button>
+            </div>
+          </div>
+        ) : null}
+
+        {!isSettingsOnlyMode && activeTab === "orderList" ? (
+          <section className="mt-4 space-y-4 pb-36">
+            <div className="rounded-2xl bg-white p-4 shadow-sm ring-1 ring-orange-100">
+              <div className="flex items-center justify-between gap-3">
+                <div>
+                  <p className="text-xs font-semibold uppercase tracking-[0.18em] text-orange-600">
+                    Table & Transaksi
+                  </p>
+                  <h2 className="mt-1 text-base font-bold text-slate-900">
+                    Table: {displayTableNumber}
+                  </h2>
+                  {activeTransactionId ? (
+                    <p className="mt-0.5 text-xs text-slate-500">
+                      Transaction: <span className="font-mono font-semibold">{activeTransactionId}</span>
+                    </p>
+                  ) : null}
+                  {paxCountDisplay ? (
+                    <p className="mt-0.5 text-xs text-slate-500">
+                      Number of Pax: <span className="font-semibold">{paxCountDisplay} orang</span>
+                    </p>
+                  ) : null}
+                </div>
+                <button
+                  type="button"
+                  onClick={handleRefreshOrderList}
+                  className="rounded-xl border border-orange-200 bg-orange-50 px-3 py-2 text-xs font-semibold text-orange-700 hover:bg-orange-100"
+                >
+                  Refresh 🔄
+                </button>
+              </div>
+              {isAwaitingPaymentConfirmation ? (
+                <div className="mt-3 rounded-xl border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-800">
+                  ⏳ Menunggu konfirmasi pembayaran di kasir...
+                </div>
+              ) : null}
+            </div>
+
+            {sortedOrderList.length === 0 ? (
+              <div className="rounded-2xl bg-white p-6 text-center shadow-sm ring-1 ring-slate-100">
+                <p className="text-3xl">📋</p>
+                <p className="mt-2 text-sm font-semibold text-slate-700">Belum ada order</p>
+                <p className="mt-1 text-xs text-slate-500">
+                  Tambahkan item ke keranjang dan lakukan order untuk mulai.
+                </p>
+              </div>
+            ) : (
+              <div className="space-y-3">
+                {sortedOrderList.map((order) => {
+                  const needAckBadge =
+                    order.ackStatus === "PENDING_ACK" ||
+                    order.ackStatus === "TIMEOUT";
+                  const isFailed = order.ackStatus === "FAILED_DELIVERY";
+                  const itemCount = order.items.reduce(
+                    (sum, it) => sum + it.quantity,
+                    0,
+                  );
+                  return (
+                    <div
+                      key={order.submissionId}
+                      className={`rounded-2xl bg-white p-4 shadow-sm ring-1 ${
+                        isFailed
+                          ? "ring-rose-200"
+                          : needAckBadge
+                          ? "ring-amber-200"
+                          : "ring-slate-100"
+                      }`}
+                    >
+                      <div className="flex items-start justify-between gap-3">
+                        <div className="flex items-start gap-2 flex-1">
+                          <span className="text-lg">📋</span>
+                          <div className="min-w-0 flex-1">
+                            <div className="flex flex-wrap items-center gap-2">
+                              <h3 className="text-sm font-extrabold text-slate-900">
+                                Order {order.orderIndex} ({itemCount} Item)
+                              </h3>
+                              {needAckBadge ? (
+                                <span className="inline-flex items-center gap-1 rounded-full bg-amber-100 px-2 py-0.5 text-[10px] font-bold uppercase tracking-wide text-amber-800">
+                                  ⚠️ Menunggu Konfirmasi Kasir
+                                </span>
+                              ) : isFailed ? (
+                                <span className="inline-flex items-center gap-1 rounded-full bg-rose-100 px-2 py-0.5 text-[10px] font-bold uppercase tracking-wide text-rose-800">
+                                  ❌ Gagal Terkirim
+                                </span>
+                              ) : (
+                                <span className="inline-flex items-center gap-1 rounded-full bg-emerald-100 px-2 py-0.5 text-[10px] font-bold uppercase tracking-wide text-emerald-800">
+                                  ✓ Dapur
+                                </span>
+                              )}
+                            </div>
+                            {order.receiptNumber ? (
+                              <p className="mt-0.5 text-[11px] text-slate-500 font-mono">
+                                Struk: {order.receiptNumber}
+                              </p>
+                            ) : null}
+                          </div>
+                        </div>
+                        <p className="text-sm font-extrabold text-slate-900 shrink-0">
+                          {rupiahFormatter.format(order.subtotal)}
+                        </p>
+                      </div>
+
+                      <div className="mt-3 space-y-1.5 border-t border-slate-100 pt-3">
+                        {order.items.map((it, idx) => (
+                          <div key={`${order.submissionId}-${idx}`}>
+                            <div className="flex items-baseline justify-between gap-2">
+                              <p className="text-xs font-semibold text-slate-800">
+                                <span className="font-extrabold text-slate-900">
+                                  {it.quantity}x
+                                </span>{" "}
+                                {it.name}
+                              </p>
+                              <p className="text-xs font-bold text-slate-700">
+                                {rupiahFormatter.format(it.subtotal)}
+                              </p>
+                            </div>
+                            {it.variantNotes && it.variantNotes.length > 0 ? (
+                              <div className="mt-0.5 pl-5">
+                                {it.variantNotes.map((vn, vIdx) => (
+                                  <p
+                                    key={vIdx}
+                                    className="text-[11px] leading-relaxed text-slate-500"
+                                  >
+                                    1x {vn}
+                                  </p>
+                                ))}
+                              </div>
+                            ) : it.note ? (
+                              <div className="mt-0.5 pl-5">
+                                <p className="text-[11px] leading-relaxed text-slate-500">
+                                  Catatan: {it.note}
+                                </p>
+                              </div>
+                            ) : null}
+                          </div>
+                        ))}
+                      </div>
+
+                      <div className="mt-3 flex items-center justify-between border-t border-slate-100 pt-3">
+                        <span className="text-xs text-slate-500">Subtotal</span>
+                        <div className="flex items-center gap-2">
+                          {isFailed || needAckBadge ? (
+                            <button
+                              type="button"
+                              onClick={() => handleRetryOrderCard(order.submissionId)}
+                              disabled={isSubmitting}
+                              className="rounded-lg border border-orange-200 bg-orange-50 px-3 py-1.5 text-xs font-bold text-orange-700 hover:bg-orange-100 disabled:cursor-not-allowed disabled:opacity-60"
+                            >
+                              🔄 Kirim Ulang
+                            </button>
+                          ) : null}
+                          <span className="text-sm font-extrabold text-slate-900">
+                            {rupiahFormatter.format(order.subtotal)}
+                          </span>
+                        </div>
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            )}
+          </section>
+        ) : null}
+
         {!isSettingsOnlyMode ? (
           <>
-            <section className="mt-4 space-y-5">
-              {!loading && !error && products.length > 0 ? (
-            <div className="sticky top-3 z-10 space-y-3 rounded-2xl bg-white/90 p-3 shadow-sm ring-1 ring-orange-100 backdrop-blur">
+            {activeTab === "menu" ? (
+              <section className="mt-4 space-y-5">
+                {!loading && !error && products.length > 0 ? (
+                  <div className="sticky top-[4.5rem] z-10 space-y-3 rounded-2xl bg-white/90 p-3 shadow-sm ring-1 ring-orange-100 backdrop-blur">
               <div className="flex items-center gap-2 rounded-xl border border-orange-100 bg-orange-50 px-3 py-2">
                 <span className="text-sm text-orange-500">⌕</span>
                 <input
@@ -1090,21 +1882,61 @@ export default function HomePage({ forcedMode }: HomePageClientProps = {}) {
               </div>
             </div>
               ))}
-            </section>
+              </section>
+            ) : null}
           </>
         ) : null}
       </section>
 
+      {!isSettingsOnlyMode && activeTab === "orderList" && hasAnyOrder ? (
+        <div className="fixed bottom-0 left-1/2 z-40 w-full max-w-md -translate-x-1/2 border-t border-slate-200 bg-white px-4 py-3 shadow-[0_-6px_16px_rgba(0,0,0,0.08)]">
+          <div className="flex items-center justify-between gap-3">
+            <div>
+              <p className="text-xs font-semibold uppercase tracking-wide text-slate-500">
+                Total Payment ▲
+              </p>
+              <p className="text-lg font-extrabold text-slate-900">
+                {rupiahFormatter.format(totalOrderPayment)}
+              </p>
+            </div>
+            <button
+              type="button"
+              onClick={handleBayarClick}
+              disabled={isAwaitingPaymentConfirmation}
+              className="rounded-2xl bg-emerald-600 px-6 py-3 text-sm font-extrabold text-white shadow-sm transition hover:bg-emerald-700 active:scale-[0.98] disabled:cursor-not-allowed disabled:opacity-60"
+            >
+              {isAwaitingPaymentConfirmation ? "MENUNGGU KASIR..." : "BAYAR"}
+            </button>
+          </div>
+          {isAwaitingPaymentConfirmation ? (
+            <div className="mt-2 flex items-center justify-between">
+              <p className="text-xs text-amber-700">
+                ⏳ Silakan selesaikan di kasir.
+              </p>
+              <button
+                type="button"
+                onClick={handleCompletePaymentSuccess}
+                className="rounded-lg border border-emerald-200 bg-emerald-50 px-3 py-1.5 text-[11px] font-bold text-emerald-700 hover:bg-emerald-100"
+              >
+                (Simulasi Lunas)
+              </button>
+            </div>
+          ) : null}
+        </div>
+      ) : null}
+
       {!isSettingsOnlyMode ? (
         <button
-        type="button"
-        onClick={handleOpenCheckout}
-        disabled={displayCartSummary.itemCount === 0}
-        className="fixed bottom-4 left-1/2 w-[calc(100%-2rem)] max-w-md -translate-x-1/2 rounded-2xl bg-slate-900 px-5 py-4 text-left text-white shadow-lg ring-1 ring-black/10"
-      >
-        <p className="text-sm font-semibold">
-          {displayCartSummary.itemCount} items | {rupiahFormatter.format(displayCartSummary.total)}
-        </p>
+          type="button"
+          onClick={handleOpenCheckout}
+          disabled={displayCartSummary.itemCount === 0}
+          className={`fixed left-1/2 z-40 w-[calc(100%-2rem)] max-w-md -translate-x-1/2 rounded-2xl bg-slate-900 px-5 py-4 text-left text-white shadow-lg ring-1 ring-black/10 transition ${
+            activeTab === "orderList" && hasAnyOrder ? "bottom-20" : "bottom-4"
+          }`}
+        >
+          <p className="text-sm font-semibold">
+            {displayCartSummary.itemCount} items | {rupiahFormatter.format(displayCartSummary.total)}
+          </p>
           <p className="text-xs text-slate-300">Tap untuk lanjut ke checkout</p>
         </button>
       ) : null}
@@ -1310,6 +2142,26 @@ export default function HomePage({ forcedMode }: HomePageClientProps = {}) {
                     />
                   </div>
 
+                  <div className="mt-3 rounded-xl border border-orange-100 bg-orange-50/60 p-3">
+                    <p className="text-xs font-semibold uppercase tracking-wide text-orange-700">Jumlah Orang (Pax)</p>
+                    <input
+                      type="number"
+                      min={1}
+                      value={paxCountInput}
+                      onChange={(e) => {
+                        const v = e.target.value;
+                        if (v === "") {
+                          setPaxCountInput("");
+                          return;
+                        }
+                        const n = Number(v);
+                        if (Number.isFinite(n) && n >= 1) setPaxCountInput(Math.floor(n));
+                      }}
+                      placeholder="Contoh: 2"
+                      className="mt-2 w-full rounded-lg border border-orange-200 bg-white px-3 py-2 text-sm text-slate-700 outline-none ring-orange-300 focus:ring-2"
+                    />
+                  </div>
+
                   <div className="mt-4 rounded-xl border border-slate-100 p-3">
                     <div className="flex items-center justify-between text-sm">
                       <span className="text-slate-500">Metode Pembayaran</span>
@@ -1402,6 +2254,204 @@ export default function HomePage({ forcedMode }: HomePageClientProps = {}) {
               alt="QRIS Toko ukuran penuh"
               className="max-h-full max-w-full object-contain"
             />
+          </div>
+        </div>
+      ) : null}
+
+      {queueScreen.isOpen ? (
+        <div className="fixed inset-0 z-[80] flex items-center justify-center bg-slate-950/70 backdrop-blur-sm p-4">
+          <div className="w-full max-w-md rounded-3xl bg-white shadow-2xl ring-1 ring-black/5 overflow-hidden">
+            {!queueScreen.isFailed ? (
+              <div className="p-6 text-center">
+                <div className="mx-auto flex h-20 w-20 items-center justify-center rounded-full bg-orange-100">
+                  <span className="text-4xl animate-pulse">⏳</span>
+                </div>
+                <h2 className="mt-5 text-xl font-extrabold text-slate-900">
+                  Pesanan Sedang Diproses
+                </h2>
+                <div className="mt-3 flex flex-wrap items-center justify-center gap-2">
+                  <span className="inline-flex rounded-full bg-orange-100 px-3 py-1 text-xs font-semibold text-orange-700">
+                    Meja: {displayTableNumber}
+                  </span>
+                  {queueScreen.transactionId ? (
+                    <span className="inline-flex rounded-full bg-slate-100 px-3 py-1 text-xs font-semibold text-slate-700 font-mono">
+                      {queueScreen.transactionId}
+                    </span>
+                  ) : null}
+                </div>
+
+                {queueScreen.queuePosition && queueScreen.queueTotal ? (
+                  <div className="mt-4 rounded-2xl bg-slate-50 p-3">
+                    <p className="text-sm font-semibold text-slate-800">
+                      Antrian: <span className="text-orange-600">#{queueScreen.queuePosition}</span> dari {queueScreen.queueTotal}
+                    </p>
+                  </div>
+                ) : null}
+
+                {queueScreen.etaSeconds !== undefined ? (
+                  <p className="mt-3 text-sm text-slate-600">
+                    Estimasi: <span className="font-bold text-slate-900">{queueScreen.etaSeconds}</span> detik
+                  </p>
+                ) : null}
+
+                <div className="mt-5">
+                  <div className="h-3 w-full overflow-hidden rounded-full bg-slate-100">
+                    <div
+                      className="h-full rounded-full bg-gradient-to-r from-orange-400 to-orange-600 transition-all duration-300"
+                      style={{ width: `${Math.min(100, Math.max(0, queueScreen.progressPct))}%` }}
+                    />
+                  </div>
+                  <p className="mt-2 text-right text-xs font-bold text-slate-600">
+                    {Math.floor(Math.min(100, Math.max(0, queueScreen.progressPct)))}%
+                  </p>
+                </div>
+
+                <div className="mt-4 rounded-2xl border border-orange-100 bg-orange-50/60 px-4 py-3">
+                  <p className="text-sm font-semibold text-orange-800">
+                    {queueScreen.stageMessage || "Memproses..."}
+                  </p>
+                </div>
+
+                {queueScreen.submissionId ? (
+                  <p className="mt-4 text-[10px] font-mono text-slate-400 break-all">
+                    submissionId: {queueScreen.submissionId}
+                  </p>
+                ) : null}
+              </div>
+            ) : (
+              <div className="p-6 text-center">
+                <div className="mx-auto flex h-20 w-20 items-center justify-center rounded-full bg-rose-100">
+                  <span className="text-4xl">⚠️</span>
+                </div>
+                <h2 className="mt-5 text-xl font-extrabold text-slate-900">
+                  Pesanan Belum Terkirim
+                </h2>
+                <div className="mt-4 rounded-2xl border border-rose-100 bg-rose-50 px-4 py-3">
+                  <p className="text-sm text-rose-800">
+                    {queueScreen.failureMessage ||
+                      "Perangkat kasir tidak merespon dalam 30 detik. Pesanan belum tercetak di dapur."}
+                  </p>
+                </div>
+                {queueScreen.submissionId ? (
+                  <div className="mt-3 rounded-xl bg-slate-50 px-3 py-2 text-left">
+                    <p className="text-[11px] font-mono text-slate-500 break-all">
+                      submissionId: {queueScreen.submissionId}
+                    </p>
+                  </div>
+                ) : null}
+                <div className="mt-6 grid grid-cols-2 gap-3">
+                  <button
+                    type="button"
+                    onClick={handleCloseQueueScreen}
+                    disabled={isSubmitting}
+                    className="rounded-xl border border-slate-200 bg-white px-4 py-3 text-sm font-semibold text-slate-700 transition hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-60"
+                  >
+                    Batalkan
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => void handleRetryFailedOrder()}
+                    disabled={isSubmitting}
+                    className="rounded-xl bg-orange-500 px-4 py-3 text-sm font-bold text-white shadow-sm transition hover:bg-orange-600 disabled:cursor-not-allowed disabled:opacity-60"
+                  >
+                    🔄 COBA LAGI
+                  </button>
+                </div>
+                <p className="mt-3 text-[11px] text-slate-400">
+                  Retry menggunakan submissionId yang sama (tidak akan double order)
+                </p>
+              </div>
+            )}
+          </div>
+        </div>
+      ) : null}
+
+      {isPaymentMethodModalOpen ? (
+        <div className="fixed inset-0 z-[75] flex items-center justify-center bg-slate-950/60 backdrop-blur-sm p-4">
+          <div className="w-full max-w-sm rounded-3xl bg-white shadow-2xl ring-1 ring-black/5 p-6">
+            <h3 className="text-center text-xl font-extrabold text-slate-900">
+              Pilih Metode Pembayaran
+            </h3>
+            <p className="mt-1 text-center text-sm text-slate-500">
+              Total tagihan: <span className="font-bold text-slate-900">{rupiahFormatter.format(totalOrderPayment)}</span>
+            </p>
+            <div className="mt-6 space-y-3">
+              {qrisImageUrl ? (
+                <button
+                  type="button"
+                  onClick={() => handlePaymentMethodSelected("QRIS")}
+                  className="w-full rounded-2xl border border-emerald-200 bg-emerald-50 px-4 py-4 text-left transition hover:bg-emerald-100 active:scale-[0.99]"
+                >
+                  <div className="flex items-center gap-3">
+                    <span className="flex h-12 w-12 shrink-0 items-center justify-center rounded-xl bg-emerald-500 text-white text-xl">
+                      💳
+                    </span>
+                    <div>
+                      <p className="text-sm font-extrabold text-emerald-800">Bayar QRIS</p>
+                      <p className="text-xs text-emerald-700/80">Scan QRIS toko via E-Wallet / M-Banking</p>
+                    </div>
+                  </div>
+                </button>
+              ) : null}
+              {allowPayAtCashier ? (
+                <button
+                  type="button"
+                  onClick={() => handlePaymentMethodSelected("CASHIER")}
+                  className="w-full rounded-2xl border border-slate-200 bg-slate-50 px-4 py-4 text-left transition hover:bg-slate-100 active:scale-[0.99]"
+                >
+                  <div className="flex items-center gap-3">
+                    <span className="flex h-12 w-12 shrink-0 items-center justify-center rounded-xl bg-slate-700 text-white text-xl">
+                      🏧
+                    </span>
+                    <div>
+                      <p className="text-sm font-extrabold text-slate-800">Bayar di Kasir</p>
+                      <p className="text-xs text-slate-600">Selesaikan pembayaran langsung ke kasir toko</p>
+                    </div>
+                  </div>
+                </button>
+              ) : null}
+            </div>
+            <button
+              type="button"
+              onClick={() => setIsPaymentMethodModalOpen(false)}
+              className="mt-5 w-full rounded-xl border border-slate-200 bg-white px-4 py-3 text-sm font-semibold text-slate-600 hover:bg-slate-50"
+            >
+              Batal
+            </button>
+          </div>
+        </div>
+      ) : null}
+
+      {snackbar.isOpen ? (
+        <div className="fixed left-1/2 top-6 z-[90] w-[calc(100%-2rem)] max-w-md -translate-x-1/2 pointer-events-none">
+          <div
+            className={`rounded-2xl px-4 py-3 shadow-lg ring-1 ${
+              snackbar.type === "success"
+                ? "bg-emerald-600 text-white ring-emerald-500"
+                : snackbar.type === "error"
+                ? "bg-rose-600 text-white ring-rose-500"
+                : "bg-slate-900 text-white ring-slate-800"
+            }`}
+          >
+            <div className="flex items-start gap-3">
+              <span className="text-lg shrink-0">
+                {snackbar.type === "success"
+                  ? "✅"
+                  : snackbar.type === "error"
+                  ? "❌"
+                  : "ℹ️"}
+              </span>
+              <p className="text-sm font-semibold leading-relaxed flex-1">
+                {snackbar.message}
+              </p>
+              <button
+                type="button"
+                onClick={closeSnackbar}
+                className="pointer-events-auto text-xs font-bold opacity-80 hover:opacity-100 shrink-0"
+              >
+                ✕
+              </button>
+            </div>
           </div>
         </div>
       ) : null}

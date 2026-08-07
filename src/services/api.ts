@@ -96,6 +96,14 @@ export interface SubmitOrderInput {
   status?: string;
   orderStatus?: string;
   paymentStatus?: string;
+  tableNumber?: string;
+  items?: OrderItemInput[];
+  paymentProofImageBase64?: string;
+  orderNote?: string;
+  submissionId: string;
+  paxCount?: number;
+  transactionId?: string;
+  orderIndex?: number;
 }
 
 export interface SubmitOrderResponse {
@@ -107,6 +115,14 @@ export interface SubmitOrderResponse {
   receipt_url?: string;
   receiptUrl?: string;
   [key: string]: unknown;
+  success?: boolean;
+  receipt?: any;
+  submissionId?: string;
+  ackStatus?: "PENDING_ACK" | "POS_ACKNOWLEDGED" | "POS_PRINTED" | "FAILED_DELIVERY" | "TIMEOUT";
+  resolvedDeviceUuid?: string;
+  queueEtaSeconds?: number;
+  retryAvailable?: boolean;
+  pollUntilAckUrl?: string;
 }
 
 export interface PublicSettingsResponse {
@@ -778,4 +794,359 @@ export async function updateReceiptFooter({
     branchId: json.data?.branchId,
     receiptFooter: json.receiptFooter,
   };
+}
+
+export async function pollOrderAckStatus({
+  tenantId,
+  branchId,
+  orderId,
+  submissionId,
+  maxSeconds = 35,
+  onTick,
+}: {
+  tenantId: string;
+  branchId?: string;
+  orderId?: string | number;
+  submissionId?: string;
+  maxSeconds?: number;
+  onTick?: (remainingSec: number) => void;
+}): Promise<{ ackStatus: string; ackMessage?: string; error?: string }> {
+  const pollIntervalMs = 2000;
+  const startTime = Date.now();
+  const maxMs = maxSeconds * 1000;
+
+  while (Date.now() - startTime < maxMs) {
+    const elapsed = Date.now() - startTime;
+    const remaining = Math.max(0, Math.ceil((maxMs - elapsed) / 1000));
+    if (onTick) {
+      try {
+        onTick(remaining);
+      } catch (_) {}
+    }
+
+    try {
+      const pathSegment = orderId
+        ? encodeURIComponent(String(orderId))
+        : submissionId
+        ? `by-submission/${encodeURIComponent(submissionId)}`
+        : null;
+
+      if (!pathSegment) {
+        return {
+          ackStatus: "FAILED_DELIVERY",
+          error: "orderId atau submissionId diperlukan untuk polling.",
+        };
+      }
+
+      const url = new URL(`/api/v1/orders/${pathSegment}/ack-status`, BRIDGE_API_URL);
+      url.searchParams.set("tenantId", tenantId);
+      if (branchId?.trim()) {
+        url.searchParams.set("branchId", branchId.trim());
+      }
+
+      const resp = await fetch(url.toString(), {
+        method: "GET",
+        headers: { "Content-Type": "application/json" },
+        cache: "no-store",
+      });
+
+      if (resp.ok) {
+        try {
+          const data = (await resp.json()) as Record<string, unknown>;
+          const ackStatus =
+            toStringOrUndefined(data.ackStatus) ??
+            toStringOrUndefined(data.ack_status) ??
+            "";
+          const ackMessage =
+            toStringOrUndefined(data.ackMessage) ??
+            toStringOrUndefined(data.ack_message) ??
+            toStringOrUndefined(data.message);
+
+          if (
+            ackStatus === "POS_PRINTED" ||
+            ackStatus === "POS_ACKNOWLEDGED" ||
+            ackStatus === "FAILED_DELIVERY"
+          ) {
+            return { ackStatus, ackMessage };
+          }
+        } catch (_parseErr) {}
+      }
+    } catch (_pollErr) {}
+
+    await new Promise((r) => setTimeout(r, pollIntervalMs));
+  }
+
+  return {
+    ackStatus: "TIMEOUT",
+    error: `Polling ACK melebihi ${maxSeconds} detik.`,
+  };
+}
+
+export async function submitOrderWithPosQueueAck(
+  input: SubmitOrderInput & {
+    onProgress?: (pct: number, stage: string, etaSeconds?: number) => void;
+  },
+): Promise<SubmitOrderResponse & { ackStatus?: string; error?: string }> {
+  const { onProgress, ...restInput } = input;
+
+  let submissionId = restInput.submissionId?.trim();
+  if (!submissionId) {
+    try {
+      if (typeof crypto !== "undefined" && "randomUUID" in crypto) {
+        submissionId = (crypto as Crypto).randomUUID();
+      } else {
+        submissionId = `sub-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+      }
+    } catch (_) {
+      submissionId = `sub-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+    }
+  }
+
+  const relayUrl = `${BRIDGE_API_URL}/api/v1/relay/web-order`;
+  const payloadItems = restInput.items ?? restInput.cartItems ?? [];
+  const tableNum = restInput.tableNumber ?? restInput.table;
+
+  const relayPayload = {
+    tenantId: restInput.tenantId,
+    branchId: restInput.branchId?.trim() || undefined,
+    tableId: restInput.tableId?.trim() || undefined,
+    tableNumber: tableNum,
+    submissionId,
+    transactionId: restInput.transactionId?.trim() || undefined,
+    orderIndex: restInput.orderIndex,
+    paxCount: restInput.paxCount,
+    orderPayload: {
+      items: payloadItems.map((item) => ({
+        productId: resolveOrderItemProductId(item),
+        quantity: item.quantity,
+        price: item.price,
+        name: item.name,
+        subtotal: item.subtotal ?? item.price * item.quantity,
+        note: item.note?.trim() || undefined,
+      })),
+      customerName: restInput.customerName?.trim() || undefined,
+      totalAmount: restInput.totalAmount,
+      paymentMethod: (restInput.paymentMethod || "CASHIER").toString().trim(),
+      orderNote:
+        (restInput.orderNote ?? restInput.notes)?.trim() || undefined,
+      paymentProofImageBase64: restInput.paymentProofImageBase64?.trim() || undefined,
+    },
+  };
+
+  const reportProgress = (pct: number, stage: string, etaSeconds?: number) => {
+    if (!onProgress) return;
+    try {
+      onProgress(pct, stage, etaSeconds);
+    } catch (_) {}
+  };
+
+  reportProgress(5, "Menyiapkan pesanan...");
+
+  try {
+    const startTime = Date.now();
+    let response: Response;
+    let rawJson: Record<string, unknown>;
+    let queueEtaFromHeader: number | undefined;
+
+    try {
+      reportProgress(15, "Mengirim ke kasir...", 30);
+      response = await fetch(relayUrl, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(relayPayload),
+      });
+
+      const etaHeader = response.headers.get("X-Queue-Eta");
+      if (etaHeader) {
+        const parsed = Number(etaHeader);
+        if (Number.isFinite(parsed) && parsed > 0) {
+          queueEtaFromHeader = parsed;
+        }
+      }
+
+      try {
+        rawJson = (await response.json()) as Record<string, unknown>;
+      } catch (_parseErr) {
+        rawJson = {};
+      }
+    } catch (fetchErr) {
+      return {
+        success: false,
+        submissionId,
+        ackStatus: "TIMEOUT",
+        retryAvailable: true,
+        error:
+          fetchErr instanceof Error
+            ? fetchErr.message
+            : "Koneksi terputus saat mengirim pesanan.",
+      };
+    }
+
+    const dataRoot =
+      rawJson && typeof rawJson.data === "object" && rawJson.data
+        ? (rawJson.data as Record<string, unknown>)
+        : rawJson;
+
+    const ackStatus =
+      (toStringOrUndefined(dataRoot.ackStatus) as SubmitOrderResponse["ackStatus"]) ??
+      (toStringOrUndefined(rawJson.ackStatus) as SubmitOrderResponse["ackStatus"]);
+
+    const retryAvailable =
+      typeof dataRoot.retryAvailable === "boolean"
+        ? dataRoot.retryAvailable
+        : typeof rawJson.retryAvailable === "boolean"
+        ? rawJson.retryAvailable
+        : undefined;
+
+    const echoSubmissionId =
+      toStringOrUndefined(dataRoot.submissionId) ??
+      toStringOrUndefined(rawJson.submissionId) ??
+      submissionId;
+
+    const resolvedDeviceUuid =
+      toStringOrUndefined(dataRoot.resolvedDeviceUuid) ??
+      toStringOrUndefined(rawJson.resolvedDeviceUuid);
+
+    const pollUntilAckUrl =
+      toStringOrUndefined(dataRoot.pollUntilAckUrl) ??
+      toStringOrUndefined(rawJson.pollUntilAckUrl);
+
+    const responseOrderId =
+      toStringOrUndefined(dataRoot.orderId) ??
+      toStringOrUndefined(dataRoot.id) ??
+      toStringOrUndefined(rawJson.orderId) ??
+      toStringOrUndefined(rawJson.order_id);
+
+    const responseReceiptNumber =
+      toStringOrUndefined(dataRoot.receiptNumber) ??
+      toStringOrUndefined(dataRoot.receipt_number) ??
+      toStringOrUndefined(rawJson.receiptNumber) ??
+      toStringOrUndefined(rawJson.receipt_number);
+
+    const responseMessage =
+      toStringOrUndefined(rawJson.message) ??
+      toStringOrUndefined(dataRoot.message);
+
+    if (!response.ok) {
+      if (response.status === 504 || response.status === 503 || response.status === 502) {
+        return {
+          success: false,
+          submissionId: echoSubmissionId,
+          orderId: responseOrderId,
+          receiptNumber: responseReceiptNumber,
+          message: responseMessage ?? `Perangkat kasir tidak merespon (${response.status}).`,
+          ackStatus: "TIMEOUT",
+          retryAvailable: true,
+          resolvedDeviceUuid,
+          queueEtaSeconds: queueEtaFromHeader,
+          pollUntilAckUrl,
+          error: responseMessage ?? `Perangkat kasir tidak merespon (${response.status}).`,
+        };
+      }
+
+      return {
+        success: false,
+        submissionId: echoSubmissionId,
+        orderId: responseOrderId,
+        receiptNumber: responseReceiptNumber,
+        message: responseMessage ?? `Gagal mengirim pesanan (${response.status}).`,
+        ackStatus: "FAILED_DELIVERY",
+        retryAvailable: retryAvailable ?? false,
+        resolvedDeviceUuid,
+        queueEtaSeconds: queueEtaFromHeader,
+        pollUntilAckUrl,
+        error: responseMessage ?? `Gagal mengirim pesanan (${response.status}).`,
+      };
+    }
+
+    if (ackStatus === "POS_PRINTED" || ackStatus === "POS_ACKNOWLEDGED") {
+      reportProgress(100, "Pesanan diterima & dicetak dapur!", 0);
+      return {
+        success: true,
+        submissionId: echoSubmissionId,
+        orderId: responseOrderId,
+        receiptNumber: responseReceiptNumber,
+        message: responseMessage,
+        receipt: dataRoot.receipt ?? rawJson.receipt,
+        ackStatus,
+        resolvedDeviceUuid,
+        queueEtaSeconds: queueEtaFromHeader,
+        retryAvailable: false,
+        pollUntilAckUrl,
+        data: dataRoot,
+      };
+    }
+
+    reportProgress(50, "Menunggu konfirmasi print...", queueEtaFromHeader ?? 35);
+
+    const pollResult = await pollOrderAckStatus({
+      tenantId: restInput.tenantId,
+      branchId: restInput.branchId,
+      orderId: responseOrderId,
+      submissionId: echoSubmissionId,
+      maxSeconds: 35,
+      onTick: (remaining) => {
+        const elapsedMs = Date.now() - startTime;
+        const totalMs = Math.max(elapsedMs + remaining * 1000, 1);
+        const pct = Math.min(95, Math.max(50, Math.floor((elapsedMs / totalMs) * 100)));
+        reportProgress(pct, "Menunggu konfirmasi print...", remaining);
+      },
+    });
+
+    if (pollResult.ackStatus === "POS_PRINTED" || pollResult.ackStatus === "POS_ACKNOWLEDGED") {
+      reportProgress(100, "Pesanan diterima & dicetak dapur!", 0);
+      return {
+        success: true,
+        submissionId: echoSubmissionId,
+        orderId: responseOrderId,
+        receiptNumber: responseReceiptNumber,
+        message: pollResult.ackMessage ?? responseMessage,
+        receipt: dataRoot.receipt ?? rawJson.receipt,
+        ackStatus: pollResult.ackStatus as SubmitOrderResponse["ackStatus"],
+        resolvedDeviceUuid,
+        queueEtaSeconds: queueEtaFromHeader,
+        retryAvailable: false,
+        pollUntilAckUrl,
+        data: dataRoot,
+      };
+    }
+
+    if (pollResult.ackStatus === "FAILED_DELIVERY") {
+      return {
+        success: false,
+        submissionId: echoSubmissionId,
+        orderId: responseOrderId,
+        receiptNumber: responseReceiptNumber,
+        message: pollResult.ackMessage ?? pollResult.error ?? "Pesanan gagal dikirim ke dapur.",
+        ackStatus: "FAILED_DELIVERY",
+        retryAvailable: true,
+        resolvedDeviceUuid,
+        queueEtaSeconds: queueEtaFromHeader,
+        pollUntilAckUrl,
+        error: pollResult.error ?? "Pesanan gagal dikirim ke dapur.",
+      };
+    }
+
+    return {
+      success: false,
+      submissionId: echoSubmissionId,
+      orderId: responseOrderId,
+      receiptNumber: responseReceiptNumber,
+      message: pollResult.error ?? "Perangkat kasir tidak merespon dalam 30 detik.",
+      ackStatus: "TIMEOUT",
+      retryAvailable: true,
+      resolvedDeviceUuid,
+      queueEtaSeconds: queueEtaFromHeader,
+      pollUntilAckUrl,
+      error: pollResult.error ?? "Perangkat kasir tidak merespon dalam 30 detik.",
+    };
+  } catch (err) {
+    return {
+      success: false,
+      submissionId,
+      ackStatus: "FAILED_DELIVERY",
+      retryAvailable: true,
+      error: err instanceof Error ? err.message : "Terjadi kesalahan tak terduga.",
+    };
+  }
 }
