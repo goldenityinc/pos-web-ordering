@@ -838,7 +838,15 @@ export async function pollOrderAckStatus({
         };
       }
 
-      const url = new URL(`/api/v1/orders/${pathSegment}/ack-status`, BRIDGE_API_URL);
+      // 🔴 FIX 401 Unauthorized polling ACK status:
+      //    Bridge /api/v1/orders/* route PROTECTED (butuh Bearer tenant token).
+      //    Web Ordering TIDAK punya token → wajib pakai BYPASS prefix /relay/
+      //    DAN kirim header "X-Internal-Relay: 1" untuk tenantResolver Bridge
+      //    melakukan bypass Bearer auth dan resolve tenant dari query/body.
+      const url = new URL(
+        `/api/v1/relay/orders/${pathSegment}/ack-status`,
+        BRIDGE_API_URL,
+      );
       url.searchParams.set("tenantId", tenantId);
       if (branchId?.trim()) {
         url.searchParams.set("branchId", branchId.trim());
@@ -846,7 +854,10 @@ export async function pollOrderAckStatus({
 
       const resp = await fetch(url.toString(), {
         method: "GET",
-        headers: { "Content-Type": "application/json" },
+        headers: {
+          "Content-Type": "application/json",
+          "X-Internal-Relay": "1",
+        },
         cache: "no-store",
       });
 
@@ -952,7 +963,14 @@ export async function submitOrderWithPosQueueAck(
       reportProgress(15, "Mengirim ke kasir...", 30);
       response = await fetch(relayUrl, {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: {
+          "Content-Type": "application/json",
+          // 🔴 FIX 401 Unauthorized submit order:
+          //    Wajib tambahkan header "X-Internal-Relay: 1" ke endpoint
+          //    /api/v1/relay/* agar Bridge tenantResolver bypass Bearer auth
+          //    dan resolve tenant dari body payload (bukan dari JWT).
+          "X-Internal-Relay": "1",
+        },
         body: JSON.stringify(relayPayload),
       });
 

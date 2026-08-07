@@ -482,8 +482,12 @@ export default function HomePage({ forcedMode }: HomePageClientProps = {}) {
     const interval = setInterval(() => {
       (async () => {
         try {
+          // 🔴 FIX 401 Unauthorized order history poller by-transaction:
+          //    Protected Bridge route /api/v1/orders/... → ganti ke BYPASS
+          //    /api/v1/relay/orders/... + header X-Internal-Relay: 1 agar
+          //    tenantResolver bypass Bearer auth check.
           const url = new URL(
-            `/api/v1/orders/by-transaction/${encodeURIComponent(txId)}`,
+            `/api/v1/relay/orders/by-transaction/${encodeURIComponent(txId)}`,
             process.env.NEXT_PUBLIC_BRIDGE_API_URL?.trim() ||
               "https://goldenity-pos-api-bridge-production.up.railway.app",
           );
@@ -493,7 +497,10 @@ export default function HomePage({ forcedMode }: HomePageClientProps = {}) {
           }
           const resp = await fetch(url.toString(), {
             method: "GET",
-            headers: { "Content-Type": "application/json" },
+            headers: {
+              "Content-Type": "application/json",
+              "X-Internal-Relay": "1",
+            },
             cache: "no-store",
           });
           if (resp.ok) {
