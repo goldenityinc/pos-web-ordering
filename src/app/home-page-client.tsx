@@ -495,6 +495,15 @@ export default function HomePage({ forcedMode }: HomePageClientProps = {}) {
           if (branchId?.trim()) {
             url.searchParams.set("branchId", branchId.trim());
           }
+          // 🔴 FIX 2 CROSS-TABLE ISOLATION: PASS tableId KE ENDPOINT POLLING BY-TRANSACTION
+          //    Supaya Bridge + Admin Core WHERE filter table_id = MEJA INI SAJA.
+          //    Data order meja TIDAK BOcOR ke meja lain!
+          if (tableId?.trim()) {
+            url.searchParams.set("tableId", tableId.trim());
+          } else if (tableNumber?.trim() && /^\d+$/.test(tableNumber.trim())) {
+            // Fallback jika hanya ada tableNumber string numeric (mis. "3"):
+            url.searchParams.set("tableId", tableNumber.trim());
+          }
           const resp = await fetch(url.toString(), {
             method: "GET",
             headers: {
