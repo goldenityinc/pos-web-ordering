@@ -3,3 +3,14 @@ node_modules/
 out/
 .env.local
 *.log
+# 🔴 TypeScript incremental build cache (platform specific, JANGAN di commit).
+#    Ini adalah penyebab Railway build EXIT CODE 1 ketika cache dari Windows local
+#    di push ke repo → Linux Railway compile TypeScript dengan corrupt cache mismatch.
+*.tsbuildinfo
+tsconfig.tsbuildinfo
+# Local turbo / nx cache (jika nanti pakai monorepo)
+.turbo/
+dist/
+build/
+.DS_Store
+Thumbs.db
