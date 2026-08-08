@@ -106,6 +106,7 @@ type OrderRecord = {
   ackStatus: AckStatusType;
   resolvedDeviceUuid?: string;
   orderNote?: string;
+  paymentProofUrl?: string;
 };
 
 type QueueScreenState = {
