@@ -158,6 +158,17 @@ function getUrlFromUnknown(value: unknown): string | undefined {
   return undefined;
 }
 
+const UNPAID_ORDER_PAYMENT_STATUSES = new Set([
+  "PENDING_PAYMENT",
+  "PENDING",
+  "AWAITING_PAYMENT",
+  "PARTIALLY_PAID",
+  "PARTIAL",
+  "",
+  null,
+  undefined,
+]);
+
 export default function HomePage({ forcedMode }: HomePageClientProps = {}) {
   const searchParams = useSearchParams();
 
@@ -464,6 +475,33 @@ export default function HomePage({ forcedMode }: HomePageClientProps = {}) {
     }
   };
 
+  const isPaymentStatusUnpaid = (raw: unknown): boolean => {
+    const s = (raw == null ? "" : String(raw)).trim().toUpperCase();
+    if (UNPAID_ORDER_PAYMENT_STATUSES.has(s as any) || s.length === 0) return true;
+    if (s.includes("PAID") && !s.includes("PARTIAL")) return false;
+    if (["REFUNDED", "VOID", "CANCELLED", "EXPIRED", "FAILED"].includes(s)) return false;
+    return true;
+  };
+
+  const isAckStatusPaid = (raw: unknown): boolean => {
+    const s = (raw == null ? "" : String(raw)).trim().toUpperCase();
+    return s === "PAID" || s === "COMPLETED" || s === "POS_PRINTED";
+  };
+
+  const isOrderRecordPaid = (o: any): boolean => {
+    const pmRaw = String(o.paymentMethod || o.payment_method || "").toUpperCase().trim();
+    const psRaw = o.paymentStatus ?? o.payment_status ?? o.status;
+    const ackRaw = o.ackStatus ?? o.ack_status ?? "";
+    const isPaidFlag =
+      Boolean((o as any)?.isPaid) === true ||
+      Boolean((o as any)?.paid) === true ||
+      Boolean((o as any)?.is_paid) === true;
+    if (isPaidFlag) return true;
+    if (!isPaymentStatusUnpaid(psRaw)) return true;
+    if (pmRaw === "QRIS" && isAckStatusPaid(ackRaw)) return true;
+    return false;
+  };
+
   const loadOrdersForTransaction = (txId: string): OrderRecord[] => {
     if (!txId || !isMounted) return [];
     return safeParseLocalStorageJson<OrderRecord[]>(
@@ -608,42 +646,7 @@ export default function HomePage({ forcedMode }: HomePageClientProps = {}) {
               //    FILTER KETAT upstream order: hanya yang BELUM LUNAS (unpaid) yang
               //    boleh masuk normalized / storage / orderList.
               //    Order PAID — APAPUN metodenya (QRIS/CASHIER) — BUANG dari active session.
-              const UNPAID_ORDER_PAYMENT_STATUSES = new Set([
-                "PENDING_PAYMENT",
-                "PENDING",
-                "AWAITING_PAYMENT",
-                "PARTIALLY_PAID",
-                "PARTIAL",
-                "",
-                null,
-                undefined,
-              ]);
-              function isPaymentStatusUnpaid(raw: unknown): boolean {
-                const s = (raw == null ? "" : String(raw)).trim().toUpperCase();
-                if (UNPAID_ORDER_PAYMENT_STATUSES.has(s as any) || s.length === 0) return true;
-                if (s.includes("PAID") && !s.includes("PARTIAL")) return false;
-                if (["REFUNDED", "VOID", "CANCELLED", "EXPIRED", "FAILED"].includes(s)) return false;
-                return true;
-              }
-              function isAckStatusPaid(raw: unknown): boolean {
-                const s = (raw == null ? "" : String(raw)).trim().toUpperCase();
-                return s === "PAID" || s === "COMPLETED" || s === "POS_PRINTED";
-              }
-              function isOrderRecordPaid(o: any): boolean {
-                const pmRaw = String(o.paymentMethod || o.payment_method || "").toUpperCase().trim();
-                const psRaw = o.paymentStatus ?? o.payment_status ?? o.status;
-                const ackRaw = o.ackStatus ?? o.ack_status ?? "";
-                const isPaidFlag =
-                  Boolean((o as any)?.isPaid) === true ||
-                  Boolean((o as any)?.paid) === true ||
-                  Boolean((o as any)?.is_paid) === true;
-                if (isPaidFlag) return true;
-                if (!isPaymentStatusUnpaid(psRaw)) return true;
-                // Khusus QRIS: ackStatus === POS_PRINTED/PAID/COMPLETED → dianggap PAID
-                //   (sesuai bug user: QRIS paid & order ditutup → barang SUDAH LUNAS JANGAN muncul lagi)
-                if (pmRaw === "QRIS" && isAckStatusPaid(ackRaw)) return true;
-                return false;
-              }
+              //    Helper functions dipindahkan ke component scope (atas) agar legal menurut strict ES5.
 
               const unpaidUpstream = (orders as any[]).filter((o) => !isOrderRecordPaid(o));
               const upstreamHasAnyPaid = (orders as any[]).some((o) => isOrderRecordPaid(o));
