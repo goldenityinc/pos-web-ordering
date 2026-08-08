@@ -16,6 +16,7 @@ import {
   updateReceiptFooter,
   updateQrisImage,
   SubmitOrderResponse,
+  uploadQrOrderPaymentProof,
 } from "../services/api";
 import { resolveOrderItemProductId } from "../services/order-utils.js";
 import { useCart } from "../contexts/cart-context";
@@ -224,6 +225,16 @@ export default function HomePage({ forcedMode }: HomePageClientProps = {}) {
   const [isOrderSuccess, setIsOrderSuccess] = useState(false);
   const [orderReceipt, setOrderReceipt] = useState<OnlineReceiptSnapshot | null>(null);
   const [pendingOrderId, setPendingOrderId] = useState("");
+  const [qrisFirstStepCompleted, setQrisFirstStepCompleted] = useState(false);
+  const [isQrisPaymentUploading, setIsQrisPaymentUploading] = useState(false);
+  const [pendingQrisOrder, setPendingQrisOrder] = useState<{
+    orderId: string;
+    submissionId: string;
+    transactionId: string;
+    receiptNumber?: string;
+    orderIndex: number;
+    orderRecord?: OrderRecord;
+  } | null>(null);
 
   const [queueScreen, setQueueScreen] = useState<QueueScreenState>({
     isOpen: false,
@@ -386,6 +397,9 @@ export default function HomePage({ forcedMode }: HomePageClientProps = {}) {
       setOrderReceipt(null);
       setPendingOrderId("");
       setIsQrisPreviewOpen(false);
+      setQrisFirstStepCompleted(false);
+      setIsQrisPaymentUploading(false);
+      setPendingQrisOrder(null);
     }
   }, [allowPayAtCashier, isCheckoutOpen, paymentProofPreviewUrl]);
 
@@ -1030,12 +1044,25 @@ export default function HomePage({ forcedMode }: HomePageClientProps = {}) {
       const pmRaw = String(order.paymentMethod || "").toUpperCase().trim();
       const isQris = pmRaw === "QRIS";
       const ackStatus = String(order.ackStatus || "").toUpperCase().trim();
+      const anyPaymentStatus = String(
+        (order as unknown as { paymentStatus?: string; payment_status?: string }).paymentStatus ||
+        (order as unknown as { paymentStatus?: string; payment_status?: string }).payment_status ||
+        ""
+      ).toUpperCase().trim();
       const isPaidFlag =
         (order as unknown as { isPaid?: boolean; paid?: boolean }).isPaid === true ||
         (order as unknown as { isPaid?: boolean; paid?: boolean }).paid === true;
       let paid = false;
       if (isQris) {
-        paid = isPaidFlag || ackStatus === "POS_PRINTED" || ackStatus === "PAID" || ackStatus === "COMPLETED" || ackStatus === "POS_ACKNOWLEDGED";
+        const paymentStatusExplicitPaid =
+          anyPaymentStatus === "PAID" ||
+          anyPaymentStatus === "COMPLETED" ||
+          anyPaymentStatus === "SETTLED";
+        paid =
+          isPaidFlag ||
+          paymentStatusExplicitPaid ||
+          ackStatus === "PAID" ||
+          ackStatus === "COMPLETED";
       } else {
         const isCashier = pmRaw === "CASHIER" || pmRaw === "";
         if (isCashier) {
@@ -1068,12 +1095,25 @@ export default function HomePage({ forcedMode }: HomePageClientProps = {}) {
       const isQris = pmRaw === "QRIS";
       const isCashier = pmRaw === "CASHIER" || pmRaw === "";
       const ackStatus = String(order.ackStatus || "").toUpperCase().trim();
+      const anyPaymentStatus = String(
+        (order as unknown as { paymentStatus?: string; payment_status?: string }).paymentStatus ||
+        (order as unknown as { paymentStatus?: string; payment_status?: string }).payment_status ||
+        ""
+      ).toUpperCase().trim();
       const isPaidFlag =
         (order as unknown as { isPaid?: boolean; paid?: boolean }).isPaid === true ||
         (order as unknown as { isPaid?: boolean; paid?: boolean }).paid === true;
       let paid = false;
       if (isQris) {
-        paid = isPaidFlag || ackStatus === "POS_PRINTED" || ackStatus === "PAID" || ackStatus === "COMPLETED" || ackStatus === "POS_ACKNOWLEDGED";
+        const paymentStatusExplicitPaid =
+          anyPaymentStatus === "PAID" ||
+          anyPaymentStatus === "COMPLETED" ||
+          anyPaymentStatus === "SETTLED";
+        paid =
+          isPaidFlag ||
+          paymentStatusExplicitPaid ||
+          ackStatus === "PAID" ||
+          ackStatus === "COMPLETED";
         if (paid) anyQrisPaid = true;
       } else if (isCashier) {
         paid = isPaidFlag || ackStatus === "POS_PRINTED" || ackStatus === "COMPLETED";
@@ -1472,14 +1512,60 @@ export default function HomePage({ forcedMode }: HomePageClientProps = {}) {
         });
 
         setTimeout(() => {
-          setQueueScreen((prev) => ({ ...prev, isOpen: false }));
-          setIsCheckoutOpen(false);
-          setIsOrderSuccess(true);
-          setActiveTab("orderList");
-          clearCart();
+          if (selectedPaymentMethod === "QRIS") {
+            setQueueScreen((prev) => ({ ...prev, isOpen: false }));
+            setQrisFirstStepCompleted(true);
+            setIsQrisFlowOpen(true);
+            if (response.orderId) {
+              setPendingOrderId(String(response.orderId));
+            }
+            const theOrderRecord: OrderRecord = {
+              submissionId,
+              orderId: response.orderId ? String(response.orderId) : undefined,
+              orderIndex,
+              transactionId,
+              items: cartItems.map((item) => ({
+                productId: item.productId,
+                name: item.name,
+                quantity: item.quantity,
+                price: item.price,
+                subtotal: item.subtotal,
+                note: item.note,
+                modifiers: [],
+                variantNotes: item.note ? [item.note] : [],
+              })),
+              subtotal: cartSummary.total,
+              customerName: customerNameInput.trim() || undefined,
+              tableNumber,
+              tableId: tableId || undefined,
+              branchId: branchId || undefined,
+              tenantId,
+              paymentMethod: selectedPaymentMethod,
+              createdAt: new Date().toISOString(),
+              receiptNumber: response.receiptNumber,
+              ackStatus: "CHECKER_PRINTED",
+              resolvedDeviceUuid: response.resolvedDeviceUuid,
+            };
+            setPendingQrisOrder({
+              orderId: response.orderId ? String(response.orderId) : "",
+              submissionId,
+              transactionId,
+              receiptNumber: response.receiptNumber,
+              orderIndex,
+              orderRecord: theOrderRecord,
+            });
+            setSubmitError(null);
+            showSnackbar("Checker terkirim ke dapur! Silakan upload bukti transfer.", "success");
+          } else {
+            setQueueScreen((prev) => ({ ...prev, isOpen: false }));
+            setIsCheckoutOpen(false);
+            setIsOrderSuccess(true);
+            setActiveTab("orderList");
+            clearCart();
+            showSnackbar("Pesanan berhasil terkirim ke dapur!", "success");
+          }
         }, 800);
 
-        showSnackbar("Pesanan berhasil terkirim ke dapur!", "success");
         return;
       }
 
@@ -1678,6 +1764,75 @@ export default function HomePage({ forcedMode }: HomePageClientProps = {}) {
       setCopySuccess("Nominal berhasil disalin.");
     } catch (_) {
       setCopySuccess("Gagal menyalin nominal.");
+    }
+  };
+
+  const handleSubmitQrisPaymentProof = async () => {
+    if (isQrisPaymentUploading || isSubmitting) return;
+    if (!pendingQrisOrder?.orderId) {
+      setSubmitError("Order ID tidak ditemukan, ulangi proses checkout.");
+      return;
+    }
+    if (isPaymentProofMandatory && !paymentProofFile) {
+      setSubmitError("Silakan upload bukti transfer terlebih dahulu.");
+      return;
+    }
+    if (!tenantId) {
+      setSubmitError("Tenant tidak valid.");
+      return;
+    }
+
+    setIsQrisPaymentUploading(true);
+    setSubmitError(null);
+
+    try {
+      const result = await uploadQrOrderPaymentProof({
+        tenantId,
+        branchId: branchId || undefined,
+        orderId: pendingQrisOrder.orderId,
+        paymentProofFile,
+        paymentMethod: "QRIS",
+      });
+
+      if (!result.success) {
+        setSubmitError(result.error || result.message || "Gagal mengirim bukti pembayaran.");
+        return;
+      }
+
+      const txId = pendingQrisOrder.transactionId;
+      const subId = pendingQrisOrder.submissionId;
+      if (pendingQrisOrder.orderRecord && txId) {
+        const storageOrder: OrderRecord = {
+          ...pendingQrisOrder.orderRecord,
+          ackStatus: "PAID",
+          paymentProofUrl: result.data?.paymentProofUrl,
+          receiptNumber: result.data?.receiptNumber || pendingQrisOrder.receiptNumber,
+        };
+        saveOrderToTransaction(txId, storageOrder);
+      } else if (txId && subId) {
+        patchOrderInList(txId, subId, {
+          ackStatus: "PAID",
+        });
+      }
+
+      setTimeout(() => {
+        setQueueScreen((prev) => ({ ...prev, isOpen: false }));
+        setIsQrisFlowOpen(false);
+        setIsCheckoutOpen(false);
+        setIsOrderSuccess(true);
+        setActiveTab("orderList");
+        clearCart();
+        setQrisFirstStepCompleted(false);
+        setPendingQrisOrder(null);
+        setIsQrisPaymentUploading(false);
+      }, 500);
+
+      showSnackbar("Pembayaran QRIS berhasil! Struk akan dicetak di kasir.", "success");
+    } catch (err) {
+      const message = err instanceof Error ? err.message : "Gagal memproses pembayaran QRIS.";
+      setSubmitError(message);
+    } finally {
+      setIsQrisPaymentUploading(false);
     }
   };
 
@@ -2444,7 +2599,29 @@ export default function HomePage({ forcedMode }: HomePageClientProps = {}) {
                 {isQrisFlowOpen ? (
                   <div className="flex flex-1 flex-col overflow-y-auto px-4 py-4">
                     <h3 className="text-xl font-extrabold text-slate-900">Pembayaran QRIS</h3>
-                    <p className="mt-1 text-sm text-slate-500">Pesanan Anda akan dibuat segera; bukti transfer hanya dipakai saat Anda melanjutkan tahap pembayaran.</p>
+                    {qrisFirstStepCompleted ? (
+                      <div className="mt-3 rounded-2xl border border-emerald-200 bg-emerald-50 p-3">
+                        <p className="text-sm font-bold text-emerald-800">
+                          ✅ Step 1 Selesai — Checker dapur sudah tercetak
+                        </p>
+                        <p className="mt-1 text-xs text-emerald-700">
+                          {pendingQrisOrder?.receiptNumber
+                            ? `No. Struk Checker: ${pendingQrisOrder.receiptNumber} — `
+                            : ""}
+                          Silakan lakukan pembayaran via QRIS, upload bukti transfer, lalu tekan tombol "Selesaikan Pembayaran" di bawah.
+                        </p>
+                      </div>
+                    ) : (
+                      <div className="mt-3 rounded-2xl border border-sky-200 bg-sky-50 p-3">
+                        <p className="text-sm font-bold text-sky-800">
+                          ⚠️ Step 1 dari 2 — Kirim Order & Cetak Checker Dapur
+                        </p>
+                        <p className="mt-1 text-xs text-sky-700">
+                          Tekan tombol "Kirim Order ke Dapur" di bawah untuk mengirim pesanan ke kasir dan mencetak checker dapur terlebih dahulu.
+                          Setelah itu, Anda bisa scan QRIS, upload bukti transfer, dan menyelesaikan pembayaran di Step 2.
+                        </p>
+                      </div>
+                    )}
 
                     <div className="mt-4 rounded-2xl border border-orange-100 bg-orange-50 p-3">
                       {qrisImageUrl ? (
@@ -2535,19 +2712,39 @@ export default function HomePage({ forcedMode }: HomePageClientProps = {}) {
                       <button
                         type="button"
                         onClick={() => setIsQrisFlowOpen(false)}
-                        disabled={isSubmitting}
+                        disabled={isSubmitting || isQrisPaymentUploading}
                         className="rounded-xl border border-slate-200 bg-white px-4 py-3 text-sm font-semibold text-slate-700"
                       >
                         Kembali
                       </button>
-                      <button
-                        type="button"
-                        disabled={isSubmitting || (isPaymentProofMandatory && !paymentProofFile)}
-                        onClick={() => void handleSubmitOrder("QRIS", paymentProofFile)}
-                        className="rounded-xl bg-orange-500 px-4 py-3 text-sm font-bold text-white shadow-sm transition hover:bg-orange-600 disabled:cursor-not-allowed disabled:opacity-70"
-                      >
-                        {isSubmitting ? "Mengirim pesanan..." : "Pesan Sekarang"}
-                      </button>
+                      {qrisFirstStepCompleted ? (
+                        <button
+                          type="button"
+                          disabled={
+                            isSubmitting ||
+                            isQrisPaymentUploading ||
+                            !pendingQrisOrder?.orderId ||
+                            (isPaymentProofMandatory && !paymentProofFile)
+                          }
+                          onClick={() => void handleSubmitQrisPaymentProof()}
+                          className="rounded-xl bg-emerald-600 px-4 py-3 text-sm font-bold text-white shadow-sm transition hover:bg-emerald-700 disabled:cursor-not-allowed disabled:opacity-70"
+                        >
+                          {isQrisPaymentUploading
+                            ? "Memproses pembayaran..."
+                            : "Selesaikan Pembayaran"}
+                        </button>
+                      ) : (
+                        <button
+                          type="button"
+                          disabled={isSubmitting}
+                          onClick={() => void handleSubmitOrder("QRIS", null)}
+                          className="rounded-xl bg-orange-500 px-4 py-3 text-sm font-bold text-white shadow-sm transition hover:bg-orange-600 disabled:cursor-not-allowed disabled:opacity-70"
+                        >
+                          {isSubmitting
+                            ? "Mengirim pesanan..."
+                            : "Kirim Order ke Dapur"}
+                        </button>
+                      )}
                     </div>
                   </div>
                 ) : (

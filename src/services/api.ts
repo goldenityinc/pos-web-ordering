@@ -1168,3 +1168,131 @@ export async function submitOrderWithPosQueueAck(
     };
   }
 }
+
+export type UploadQrPaymentProofResponse = {
+  success: boolean;
+  idempotentReplay?: boolean;
+  transition?: string;
+  message?: string;
+  error?: string;
+  data?: {
+    id?: string | number;
+    tenantId?: string;
+    referenceId?: string;
+    receiptNumber?: string;
+    orderType?: string;
+    orderStatus?: string;
+    paymentStatus?: string;
+    paymentMethod?: string;
+    paymentProofUrl?: string;
+    storageKey?: string;
+    amountPaid?: string | number;
+    total_price?: string | number;
+    total_amount?: string | number;
+    tableId?: string | number;
+    customerName?: string;
+    updatedAt?: string;
+  };
+};
+
+export async function uploadQrOrderPaymentProof({
+  tenantId,
+  orderId,
+  branchId,
+  paymentProofFile,
+  paymentProofUrl,
+  paymentMethod,
+}: {
+  tenantId: string;
+  orderId: string | number;
+  branchId?: string;
+  paymentProofFile?: File | null;
+  paymentProofUrl?: string;
+  paymentMethod?: "QRIS" | "CASHIER";
+}): Promise<UploadQrPaymentProofResponse> {
+  if (!tenantId) {
+    throw new Error("tenantId is required to upload payment proof.");
+  }
+  if (!orderId) {
+    throw new Error("orderId is required to upload payment proof.");
+  }
+  if (!paymentProofFile && !paymentProofUrl) {
+    throw new Error("paymentProofFile or paymentProofUrl must be provided.");
+  }
+
+  const orderIdStr = String(orderId).trim();
+  const url = `${BRIDGE_API_URL}/api/v1/relay/qr-orders/${encodeURIComponent(orderIdStr)}/payment`;
+  const normalizedMethod = (paymentMethod || "QRIS").toString().trim();
+
+  let response: Response;
+  let json: UploadQrPaymentProofResponse;
+
+  if (paymentProofFile) {
+    const formData = new FormData();
+    formData.append("tenantId", tenantId);
+    formData.append("tenant_id", tenantId);
+    if (branchId?.trim()) {
+      formData.append("branchId", branchId.trim());
+      formData.append("branch_id", branchId.trim());
+    }
+    formData.append("paymentMethod", normalizedMethod);
+    formData.append("payment_method", normalizedMethod);
+    if (paymentProofUrl?.trim()) {
+      formData.append("payment_proof_url", paymentProofUrl.trim());
+    }
+    formData.append("payment_proof", paymentProofFile);
+
+    ({ response, json } = await fetchJson<UploadQrPaymentProofResponse>(
+      url,
+      {
+        method: "PUT",
+        body: formData,
+        headers: {
+          "X-Internal-Relay": "1",
+        },
+      },
+      NETWORK_WIFI_ERROR_MESSAGE,
+    ));
+  } else {
+    const payload = {
+      tenantId,
+      tenant_id: tenantId,
+      branchId: branchId?.trim() || undefined,
+      branch_id: branchId?.trim() || undefined,
+      paymentMethod: normalizedMethod,
+      payment_method: normalizedMethod,
+      payment_proof_url: paymentProofUrl?.trim(),
+      paymentProofUrl: paymentProofUrl?.trim(),
+    };
+
+    ({ response, json } = await fetchJson<UploadQrPaymentProofResponse>(
+      url,
+      {
+        method: "PUT",
+        headers: {
+          "Content-Type": "application/json",
+          "X-Internal-Relay": "1",
+        },
+        body: JSON.stringify(payload),
+      },
+      NETWORK_WIFI_ERROR_MESSAGE,
+    ));
+  }
+
+  if (!response.ok) {
+    const message =
+      (typeof json.message === "string" ? json.message : null) ||
+      (typeof json.error === "string" ? json.error : null) ||
+      `Failed to upload payment proof (${response.status}).`;
+    return {
+      success: false,
+      error: message,
+      message,
+    };
+  }
+
+  return {
+    ...json,
+    success: true,
+  };
+}
