@@ -651,10 +651,45 @@ export default function HomePage({ forcedMode }: HomePageClientProps = {}) {
               const unpaidUpstream = (orders as any[]).filter((o) => !isOrderRecordPaid(o));
               const upstreamHasAnyPaid = (orders as any[]).some((o) => isOrderRecordPaid(o));
 
-              let shouldPurgeStorageTotal =
+              // 🔴 🔴 CRITICAL HOTFIX (PAYMENT BANNER STATE LOCK "SUDAH LUNAS" PADAHAL ADA
+              //    ORDER TAMBAHAN BARU YANG UNPAID Rp 10.000):
+              //    Skenario bug user:
+              //      1) Order 1 (Americano Rp 10k) → QRIS PAID (ada di server upstream).
+              //      2) User tekan TAMBAH PESANAN → Order 2 (Teh Hijau Rp 10k) → Bayar di Kasir.
+              //      3) Submit order via POST checkout → order 2 MASIH di LOCAL STORAGE / orderList.
+              //      4) Polling 10 detik berjalan: upstream HANYA return Order 1 yang PAID
+              //         (karena Order 2 BELUM TERKIRIM / BELUM MASUK DB).
+              //      5) Hasil upstream: unpaidUpstream.length === 0 + upstreamHasAnyPaid = TRUE
+              //         → code L721 sebelumnya JALANKAN PURGE SEMUA (clearTransactionContext,
+              //           clearCart, setOrderList([])) → ORDER 2 BARU USER DITAMBAHKAN TERHAPUS!
+              //      6) orderList = [] → sortedOrderList = [] → orderPaymentFlags.allPaid === TRUE
+              //         → Banner hijau "SUDAH LUNAS" padahal user BERHUTANG Rp 10.000!
+              //    FIX:
+              //    SEBELUM jalankan purge → CHECK local currentStored (order yg sudah ada di
+              //    localStorage / state) APAKAH ADA YANG BELUM LUNAS / items>0 (artinya order
+              //    tambahan baru user yang masih pending offline). JIKA ADA → BATALKAN PURGE.
+              //    Purge HANYA boleh dijalankan JIKA:
+              //      (upstream semua paid) AND (local juga tidak ada unpaid apapun AND cart kosong).
+              const localHasAnyUnpaidItems = currentStored.some((s) => {
+                if (Array.isArray(s.items) && s.items.length > 0) {
+                  // Ada items → cek apakah ini unpaid:
+                  return !isOrderRecordPaid({
+                    paymentMethod: s.paymentMethod,
+                    paymentStatus: (s as any).paymentStatus,
+                    ackStatus: s.ackStatus,
+                  });
+                }
+                return false;
+              });
+              const localCartNotEmpty = Array.isArray(cart) && cart.length > 0 && cart.some((c) => Number(c.quantity || 0) > 0);
+              const safeToPurgeAll =
                 unpaidUpstream.length === 0 &&
                 orders.length > 0 &&
-                upstreamHasAnyPaid;
+                upstreamHasAnyPaid &&
+                !localHasAnyUnpaidItems &&
+                !localCartNotEmpty;
+
+              let shouldPurgeStorageTotal = safeToPurgeAll;
 
               // Step 2: Normalize fresh (HANYA unpaid yang masuk normalized)
               const normalized: OrderRecord[] = unpaidUpstream.map((o) => ({
@@ -713,12 +748,17 @@ export default function HomePage({ forcedMode }: HomePageClientProps = {}) {
               const freshHasAnyItems = normalized.some((n) => n.items && n.items.length > 0);
 
               // 🔴 CRITICAL FIX: JIKA upstream SEMUA order PAID (unpaidUpstream = 0 tapi
-              //    upstreamHasAnyPaid = TRUE) → ARTINYA SESSION INI SUDAH LUNAS SEMUA.
+              //    upstreamHasAnyPaid = TRUE) + LOCAL TIDAK ADA UNPAID ORDER BARU (cart juga
+              //    kosong) → ARTINYA SESSION INI SUDAH LUNAS SEMUA.
               //    Segera jalankan "Sapu Bersih" (clearCart + clearTransactionContext
               //    + reset orderList + close modals).
               //    Ini mencegah bug user: "Setelah QRIS PAID, user mau tambah pesanan →
               //    ITEM BARANG LAMA YANG SUDAH DIBAYAR muncul kembali di cart/order."
-              if (isMounted && upstreamHasAnyPaid && unpaidUpstream.length === 0) {
+              //
+              // 🔴 HOTFIX PAYMENT BANNER: Ganti conditional → safeToPurgeAll (sudah
+              //    include localHasAnyUnpaidItems + localCartNotEmpty check → JIKA ADA
+              //    order tambahan baru user yang masih offline pending → TIDAK DI PURGE).
+              if (isMounted && safeToPurgeAll) {
                 try {
                   clearTransactionContext();
                 } catch (_) {}
@@ -973,6 +1013,43 @@ export default function HomePage({ forcedMode }: HomePageClientProps = {}) {
     return sortedOrderList.reduce((sum, o) => sum + (o.subtotal || 0), 0);
   }, [sortedOrderList]);
 
+  // 🔴 CRITICAL FIX (PAYMENT BANNER STATE LOCK + REMAINING UNPAID BALANCE):
+  //    User problem: Setelah bayar QRIS order 1 Rp 10k → banner hijau "SUDAH LUNAS".
+  //    Tambah order 2 Rp 10k Bayar di Kasir → banner MASIH hijau "SUDAH LUNAS"
+  //    padahal ada sisa tagihan Rp 10.000 yang harusnya muncul BAYAR Rp 10.000.
+  //
+  //    PERBAIKAN:
+  //    1) Pisahkan `remainingUnpaidAmount`: SUM subtotal dari ORDER YANG BELUM LUNAS SAJA.
+  //    2) Tampilkan angka ini di BANNER TOTAL PAYMENT (jika > 0), TOTAL keseluruhan
+  //       (totalOrderPayment) tetap ada tapi footer info tambahin "Remaining: Rp X".
+  //    3) showPayButton = remainingUnpaidAmount > 0 (bukan allPaid negation); jika unpaid > 0 →
+  //       tombol BAYAR MUNCUL, label BANNER tidak lagi nyangkut hijau.
+  //    4) sortedOrderList.length === 0 → semua false.
+  const remainingUnpaidBalance = useMemo(() => {
+    return sortedOrderList.reduce((sum, order) => {
+      const pmRaw = String(order.paymentMethod || "").toUpperCase().trim();
+      const isQris = pmRaw === "QRIS";
+      const ackStatus = String(order.ackStatus || "").toUpperCase().trim();
+      const isPaidFlag =
+        (order as unknown as { isPaid?: boolean; paid?: boolean }).isPaid === true ||
+        (order as unknown as { isPaid?: boolean; paid?: boolean }).paid === true;
+      let paid = false;
+      if (isQris) {
+        paid = isPaidFlag || ackStatus === "POS_PRINTED" || ackStatus === "PAID" || ackStatus === "COMPLETED" || ackStatus === "POS_ACKNOWLEDGED";
+      } else {
+        const isCashier = pmRaw === "CASHIER" || pmRaw === "";
+        if (isCashier) {
+          paid = isPaidFlag || ackStatus === "POS_PRINTED" || ackStatus === "COMPLETED";
+        }
+      }
+      if (paid) return sum;
+      return sum + (Number(order.subtotal) || 0);
+    }, 0);
+  }, [sortedOrderList]);
+
+  // Banner total: prefer unpaid remaining (jika > 0) agar user lihat tagihan yang harus dibayar.
+  const bannerDisplayTotal = remainingUnpaidBalance > 0 ? remainingUnpaidBalance : totalOrderPayment;
+
   // 🔴 [FIX 3 - QRIS PAID FLOW + HIDE BAYAR BUTTON JIKA SUDAH BAYAR]
   // Aturan user exact:
   //   a) BAYAR QRIS SUDAH DONE => Order TETAP MUNCUL di list (history) TAPI:
@@ -1013,12 +1090,14 @@ export default function HomePage({ forcedMode }: HomePageClientProps = {}) {
       anyCashierUnpaid,
       allPaid,
       hasExpiredRows,
-      showPayButton: sortedOrderList.length === 0 || !allPaid,
+      remainingUnpaidBalance,
+      showPayButton: sortedOrderList.length === 0 ? false : remainingUnpaidBalance > 0,
       allPaidViaQrisOnly: anyQrisPaid && !anyCashierUnpaid && allPaid,
       statusLabel: (() => {
         if (sortedOrderList.length === 0) return "";
         if (anyQrisPaid && !anyCashierUnpaid && allPaid) return "✅ Sudah dibayar via QRIS";
         if (allPaid) return "✅ Sudah lunas";
+        if (anyQrisPaid && remainingUnpaidBalance > 0) return `⏳ Sisa tagihan ${rupiahFormatter.format(remainingUnpaidBalance)}`;
         if (anyCashierUnpaid) return "⏳ Menunggu pembayaran di kasir";
         if (anyQrisPaid) return "⏳ Sebagian dibayar QRIS";
         return "⏳ Menunggu pembayaran";
@@ -2235,11 +2314,18 @@ export default function HomePage({ forcedMode }: HomePageClientProps = {}) {
           <div className="flex items-center justify-between gap-3">
             <div>
               <p className="text-xs font-semibold uppercase tracking-wide text-slate-500">
-                Total Payment ▲
+                {remainingUnpaidBalance > 0 && remainingUnpaidBalance < totalOrderPayment
+                  ? "Sisa Tagihan ▲"
+                  : "Total Payment ▲"}
               </p>
               <p className="text-lg font-extrabold text-slate-900">
-                {rupiahFormatter.format(totalOrderPayment)}
+                {rupiahFormatter.format(bannerDisplayTotal)}
               </p>
+              {remainingUnpaidBalance > 0 && remainingUnpaidBalance < totalOrderPayment ? (
+                <p className="mt-0.5 text-[11px] font-semibold text-slate-500">
+                  Total keseluruhan: {rupiahFormatter.format(totalOrderPayment)}
+                </p>
+              ) : null}
               {orderPaymentFlags.statusLabel ? (
                 <p
                   className={`mt-1 text-xs font-bold ${
