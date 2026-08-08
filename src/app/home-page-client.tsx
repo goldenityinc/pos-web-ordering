@@ -598,17 +598,63 @@ export default function HomePage({ forcedMode }: HomePageClientProps = {}) {
                 if (!subId) continue;
                 if (hasItems) purgeKeys.add(subId + "__KEEP_FRESH");
               }
+
+              // 🔴 CRITICAL FIX (ROOT CAUSE: Cart State Contamination QRIS PAID):
+              //    Upstream polling SELALU mengembalikan SEMUA order per table (termasuk
+              //    status PAID / REFUNDED / VOID / CANCELLED), TAPI user request MUTLAK:
+              //    "Barang yang sudah dibayar SEBELUMNYA JANGAN PERNAH muncul kembali di
+              //    order list / keranjang belanja user saat ini."
+              //
+              //    FILTER KETAT upstream order: hanya yang BELUM LUNAS (unpaid) yang
+              //    boleh masuk normalized / storage / orderList.
+              //    Order PAID — APAPUN metodenya (QRIS/CASHIER) — BUANG dari active session.
+              const UNPAID_ORDER_PAYMENT_STATUSES = new Set([
+                "PENDING_PAYMENT",
+                "PENDING",
+                "AWAITING_PAYMENT",
+                "PARTIALLY_PAID",
+                "PARTIAL",
+                "",
+                null,
+                undefined,
+              ]);
+              function isPaymentStatusUnpaid(raw: unknown): boolean {
+                const s = (raw == null ? "" : String(raw)).trim().toUpperCase();
+                if (UNPAID_ORDER_PAYMENT_STATUSES.has(s as any) || s.length === 0) return true;
+                if (s.includes("PAID") && !s.includes("PARTIAL")) return false;
+                if (["REFUNDED", "VOID", "CANCELLED", "EXPIRED", "FAILED"].includes(s)) return false;
+                return true;
+              }
+              function isAckStatusPaid(raw: unknown): boolean {
+                const s = (raw == null ? "" : String(raw)).trim().toUpperCase();
+                return s === "PAID" || s === "COMPLETED" || s === "POS_PRINTED";
+              }
+              function isOrderRecordPaid(o: any): boolean {
+                const pmRaw = String(o.paymentMethod || o.payment_method || "").toUpperCase().trim();
+                const psRaw = o.paymentStatus ?? o.payment_status ?? o.status;
+                const ackRaw = o.ackStatus ?? o.ack_status ?? "";
+                const isPaidFlag =
+                  Boolean((o as any)?.isPaid) === true ||
+                  Boolean((o as any)?.paid) === true ||
+                  Boolean((o as any)?.is_paid) === true;
+                if (isPaidFlag) return true;
+                if (!isPaymentStatusUnpaid(psRaw)) return true;
+                // Khusus QRIS: ackStatus === POS_PRINTED/PAID/COMPLETED → dianggap PAID
+                //   (sesuai bug user: QRIS paid & order ditutup → barang SUDAH LUNAS JANGAN muncul lagi)
+                if (pmRaw === "QRIS" && isAckStatusPaid(ackRaw)) return true;
+                return false;
+              }
+
+              const unpaidUpstream = (orders as any[]).filter((o) => !isOrderRecordPaid(o));
+              const upstreamHasAnyPaid = (orders as any[]).some((o) => isOrderRecordPaid(o));
+
               let shouldPurgeStorageTotal =
+                unpaidUpstream.length === 0 &&
                 orders.length > 0 &&
-                orders.every(
-                  (o: any) =>
-                    Array.isArray(o.items) &&
-                    o.items.length === 0 &&
-                    (Number(o.subtotal) === 0 || Number(o.totalAmount) === 0 || Number(o.grandTotal) === 0),
-                ) &&
-                currentStored.some((o) => o.items && o.items.length > 0);
-              // Step 2: Normalize fresh
-              const normalized: OrderRecord[] = (orders as any[]).map((o) => ({
+                upstreamHasAnyPaid;
+
+              // Step 2: Normalize fresh (HANYA unpaid yang masuk normalized)
+              const normalized: OrderRecord[] = unpaidUpstream.map((o) => ({
                 submissionId:
                   String(o.submissionId || "").trim() || generateSubmissionId(),
                 orderId: o.orderId ?? o.id ?? undefined,
@@ -662,19 +708,86 @@ export default function HomePage({ forcedMode }: HomePageClientProps = {}) {
               }));
               // Step 3: Fresh data punya order BERISI items → override storage
               const freshHasAnyItems = normalized.some((n) => n.items && n.items.length > 0);
+
+              // 🔴 CRITICAL FIX: JIKA upstream SEMUA order PAID (unpaidUpstream = 0 tapi
+              //    upstreamHasAnyPaid = TRUE) → ARTINYA SESSION INI SUDAH LUNAS SEMUA.
+              //    Segera jalankan "Sapu Bersih" (clearCart + clearTransactionContext
+              //    + reset orderList + close modals).
+              //    Ini mencegah bug user: "Setelah QRIS PAID, user mau tambah pesanan →
+              //    ITEM BARANG LAMA YANG SUDAH DIBAYAR muncul kembali di cart/order."
+              if (isMounted && upstreamHasAnyPaid && unpaidUpstream.length === 0) {
+                try {
+                  clearTransactionContext();
+                } catch (_) {}
+                try {
+                  clearCart();
+                } catch (_) {}
+                setOrderList([]);
+                setIsAwaitingPaymentConfirmation(false);
+                setIsQrisFlowOpen(false);
+                setIsCheckoutOpen(false);
+                setActiveTab("menu");
+                setCustomerNameInput("");
+                setPaymentMethod("CASHIER");
+                setPendingOrderId("");
+                setOrderReceipt(null);
+                setIsOrderSuccess(false);
+                safeRemoveStorage(buildOrdersStorageKey(txId));
+                safeRemoveStorage(ACTIVE_TX_ID_KEY);
+                safeRemoveStorage(AWAITING_PAYMENT_KEY);
+                safeRemoveStorage(`${APP_STORAGE_PREFIX}paxCount_${txId}`);
+                safeRemoveStorage(`${APP_STORAGE_PREFIX}customerName_${txId}`);
+                if (typeof safeGetStorage === "function") {
+                  try {
+                    const allKeys = Object.keys(localStorage || {});
+                    for (const k of allKeys) {
+                      if (k.startsWith(APP_STORAGE_PREFIX)) {
+                        try { localStorage.removeItem(k); } catch (_e) {}
+                      }
+                    }
+                  } catch (_e) { /* ignore */ }
+                }
+                return;
+              }
+
               if (freshHasAnyItems) {
                 writeLocalStorageJson(buildOrdersStorageKey(txId), normalized);
                 setOrderList(normalized);
-                setIsAwaitingPaymentConfirmation(true);
-                if (isMounted) safeSetStorage(AWAITING_PAYMENT_KEY, "1");
+                if (normalized.length > 0) {
+                  setIsAwaitingPaymentConfirmation(true);
+                  if (isMounted) safeSetStorage(AWAITING_PAYMENT_KEY, "1");
+                } else {
+                  setIsAwaitingPaymentConfirmation(false);
+                  if (isMounted) safeSetStorage(AWAITING_PAYMENT_KEY, "0");
+                }
               } else if (currentStored.length === 0 || shouldPurgeStorageTotal) {
                 // Step 4: Semua data kosong → purge empty stale
                 writeLocalStorageJson(buildOrdersStorageKey(txId), []);
                 setOrderList([]);
+                setIsAwaitingPaymentConfirmation(false);
+                if (isMounted) safeSetStorage(AWAITING_PAYMENT_KEY, "0");
               } else {
                 // Step 5: Gabung (merge) existing STORED yg sudah ada items dengan upstream
                 //          (upstream acak waktu empty karena Bridge cache baru di-setting)
-                const merged = [...currentStored];
+                // 🔴 EXTRA SAFETY: Saat merge, FILTER currentStored yang SUDAH PAID juga
+                //    (jika user sebelumnya sudah bayar via simulasi lunas tapi storage
+                //    belum ke-clear karena refresh page).
+                const paidStored = currentStored.filter((s) =>
+                  isOrderRecordPaid({
+                    paymentMethod: s.paymentMethod,
+                    ackStatus: s.ackStatus,
+                  })
+                );
+                let cleanCurrent = currentStored;
+                if (paidStored.length > 0) {
+                  cleanCurrent = currentStored.filter((s) =>
+                    !isOrderRecordPaid({
+                      paymentMethod: s.paymentMethod,
+                      ackStatus: s.ackStatus,
+                    })
+                  );
+                }
+                const merged = [...cleanCurrent];
                 for (const n of normalized) {
                   const idx = merged.findIndex((m) => m.submissionId === n.submissionId);
                   if (idx >= 0) {
@@ -685,6 +798,10 @@ export default function HomePage({ forcedMode }: HomePageClientProps = {}) {
                 }
                 writeLocalStorageJson(buildOrdersStorageKey(txId), merged);
                 setOrderList([...merged]);
+                if (merged.length === 0) {
+                  setIsAwaitingPaymentConfirmation(false);
+                  if (isMounted) safeSetStorage(AWAITING_PAYMENT_KEY, "0");
+                }
               }
             }
           }
