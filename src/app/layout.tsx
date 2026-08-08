@@ -2,7 +2,9 @@ import type { Metadata } from "next";
 import type { ReactNode } from "react";
 import "./globals.css";
 import AppErrorBoundary from "../components/app-error-boundary";
+import MaintenanceScreen from "../components/maintenance-screen";
 import { CartProvider } from "../contexts/cart-context";
+import { isMaintenanceMode } from "../lib/maintenance";
 
 export const metadata: Metadata = {
   title: "Goldenity Web Ordering",
@@ -23,9 +25,13 @@ export default function RootLayout({ children }: RootLayoutProps) {
   return (
     <html lang="id">
       <body className="bg-slate-50 text-slate-900 antialiased">
-        <AppErrorBoundary>
-          <CartProvider>{children}</CartProvider>
-        </AppErrorBoundary>
+        {isMaintenanceMode() ? (
+          <MaintenanceScreen />
+        ) : (
+          <AppErrorBoundary>
+            <CartProvider>{children}</CartProvider>
+          </AppErrorBoundary>
+        )}
       </body>
     </html>
   );
