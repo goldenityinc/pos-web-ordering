@@ -1370,10 +1370,23 @@ export default function HomePage({ forcedMode }: HomePageClientProps = {}) {
     setIsCheckoutOpen(false);
     setActiveTab("menu");
     setCustomerNameInput("");
+    setPaxCountInput("");
     setPaymentMethod("CASHIER");
     setPendingOrderId("");
     setOrderReceipt(null);
     setIsOrderSuccess(false);
+    if (paymentProofPreviewUrl) {
+      try { URL.revokeObjectURL(paymentProofPreviewUrl); } catch (_e) {}
+    }
+    setPaymentProofFile(null);
+    setPaymentProofPreviewUrl("");
+    setCopySuccess("");
+    setQrisLoadError(null);
+    setQrisFirstStepCompleted(false);
+    setIsQrisPreviewOpen(false);
+    setIsQrisPaymentUploading(false);
+    setPendingQrisOrder(null);
+    setSubmitError(null);
     showSnackbar("Pembayaran berhasil, terima kasih!", "success");
   };
 
@@ -1620,6 +1633,17 @@ export default function HomePage({ forcedMode }: HomePageClientProps = {}) {
             setIsOrderSuccess(true);
             setActiveTab("orderList");
             clearCart();
+            setPaxCountInput("");
+            if (paymentProofPreviewUrl) {
+              try { URL.revokeObjectURL(paymentProofPreviewUrl); } catch (_e) {}
+            }
+            setPaymentProofFile(null);
+            setPaymentProofPreviewUrl("");
+            setCopySuccess("");
+            setQrisLoadError(null);
+            setIsQrisPreviewOpen(false);
+            setIsQrisPaymentUploading(false);
+            setSubmitError(null);
             showSnackbar("Pesanan berhasil terkirim ke dapur!", "success");
           }
         }, 800);
@@ -1882,9 +1906,21 @@ export default function HomePage({ forcedMode }: HomePageClientProps = {}) {
         setIsOrderSuccess(true);
         setActiveTab("orderList");
         clearCart();
+        setCustomerNameInput("");
+        setPaxCountInput("");
+        setPaymentMethod("CASHIER");
         setQrisFirstStepCompleted(false);
         setPendingQrisOrder(null);
         setIsQrisPaymentUploading(false);
+        if (paymentProofPreviewUrl) {
+          try { URL.revokeObjectURL(paymentProofPreviewUrl); } catch (_e) {}
+        }
+        setPaymentProofFile(null);
+        setPaymentProofPreviewUrl("");
+        setCopySuccess("");
+        setQrisLoadError(null);
+        setIsQrisPreviewOpen(false);
+        setSubmitError(null);
       }, 500);
 
       showSnackbar("Pembayaran QRIS berhasil! Struk akan dicetak di kasir.", "success");
@@ -2612,7 +2648,11 @@ export default function HomePage({ forcedMode }: HomePageClientProps = {}) {
           type="button"
           onClick={handleOpenCheckout}
           disabled={displayCartSummary.itemCount === 0}
-          className="relative left-auto z-10 mx-auto mb-6 mt-4 w-[calc(100%-2rem)] max-w-md translate-x-0 rounded-2xl bg-slate-900 px-5 py-4 text-left text-white shadow-lg ring-1 ring-black/10 transition disabled:cursor-not-allowed disabled:opacity-40"
+          className={
+            activeTab === "menu"
+              ? "fixed bottom-4 left-1/2 z-40 w-[calc(100%-2rem)] max-w-md -translate-x-1/2 translate-y-0 rounded-2xl bg-slate-900 px-5 py-4 text-left text-white shadow-xl ring-1 ring-black/10 transition disabled:cursor-not-allowed disabled:opacity-40"
+              : "relative left-auto z-10 mx-auto mb-6 mt-4 w-[calc(100%-2rem)] max-w-md translate-x-0 rounded-2xl bg-slate-900 px-5 py-4 text-left text-white shadow-lg ring-1 ring-black/10 transition disabled:cursor-not-allowed disabled:opacity-40"
+          }
         >
           <p className="text-sm font-semibold">
             {displayCartSummary.itemCount} items | {rupiahFormatter.format(displayCartSummary.total)}
