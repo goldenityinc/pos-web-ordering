@@ -517,6 +517,52 @@ export default function HomePage({ forcedMode }: HomePageClientProps = {}) {
     return false;
   };
 
+  // 🔴 CRITICAL RETENTION 30 MIN PAID ORDER (User bug 3):
+  //    Order yang LUNAS TIDAK LANGSUNG HILANG. Mereka TETAP muncul di
+  //    Order List "Order Saya" SELAMA 30 MENIT SETELAH DIBUAT supaya user
+  //    bisa lihat riwayat struk recent (jangan paksa user refresh page /
+  //    kehilangan jejak bayar QRIS / Bayar di Kasir).
+  const ORDER_RETENTION_PAID_MS = 30 * 60 * 1000; // 30 MENIT
+  const getOrderCreatedAtMs = (o: any): number => {
+    const raw = (o && (o.createdAt || o.created_at || o.createdAtTimestamp)) as unknown as string | number | undefined | null;
+    if (raw == null) return 0;
+    if (typeof raw === "number") {
+      return Number.isFinite(raw) ? raw : (raw > 1e12 ? raw : raw * 1000);
+    }
+    try {
+      const t = new Date(String(raw)).getTime();
+      return Number.isFinite(t) ? t : 0;
+    } catch (_) { return 0; }
+  };
+  const isOrderPaidStillWithinRetention = (o: any, nowMs: number = Date.now()): boolean => {
+    if (!isOrderRecordPaid(o)) return true; // unpaid SELALU ditampilkan
+    const ts = getOrderCreatedAtMs(o);
+    if (!ts) return false; // paid tapi tanpa tanggal → buang
+    return (nowMs - ts) < ORDER_RETENTION_PAID_MS;
+  };
+  const isOrderStaleAndPaidShouldPurge = (o: any, nowMs: number = Date.now()): boolean => {
+    return isOrderRecordPaid(o) && !isOrderPaidStillWithinRetention(o, nowMs);
+  };
+
+  // 🔴 BUG 2 SIMULASI LUNAS TERLALU CEPAT MUNCUL:
+  //    Tombol Simulasi Lunas HANYA MUNCUL JIKA order (unpaid) UDAH LEBIH DARI 30 DETIK
+  //    (tunggu cashier / bridge / queue selesai). Jangan munculkan di 1-10 detik pertama
+  //    (saat user baru klik "Bayar di Kasir" — masih dalam proses).
+  const SIMULASI_LUNAS_MIN_WAIT_MS = 30 * 1000; // 30 DETIK
+  const isOrderOldEnoughToShowSimulateLunas = (ordersArr: any[]): boolean => {
+    if (!Array.isArray(ordersArr) || ordersArr.length === 0) return false;
+    const nowMs = Date.now();
+    // Cari YANG PALING TUA di unpaid order:
+    let oldestUnpaidMs = Number.POSITIVE_INFINITY;
+    for (const o of ordersArr) {
+      if (isOrderRecordPaid(o)) continue;
+      const t = getOrderCreatedAtMs(o);
+      if (t > 0 && t < oldestUnpaidMs) oldestUnpaidMs = t;
+    }
+    if (!Number.isFinite(oldestUnpaidMs) || oldestUnpaidMs > 1e17) return false;
+    return (nowMs - oldestUnpaidMs) >= SIMULASI_LUNAS_MIN_WAIT_MS;
+  };
+
   const loadOrdersForTransaction = (txId: string): OrderRecord[] => {
     if (!txId || !isMounted) return [];
     return safeParseLocalStorageJson<OrderRecord[]>(
@@ -652,19 +698,21 @@ export default function HomePage({ forcedMode }: HomePageClientProps = {}) {
                 if (hasItems) purgeKeys.add(subId + "__KEEP_FRESH");
               }
 
-              // 🔴 CRITICAL FIX (ROOT CAUSE: Cart State Contamination QRIS PAID):
-              //    Upstream polling SELALU mengembalikan SEMUA order per table (termasuk
-              //    status PAID / REFUNDED / VOID / CANCELLED), TAPI user request MUTLAK:
-              //    "Barang yang sudah dibayar SEBELUMNYA JANGAN PERNAH muncul kembali di
-              //    order list / keranjang belanja user saat ini."
+              // 🔴 CRITICAL FIX (ROOT CAUSE: Cart State Contamination QRIS PAID)
+              //    Sebelumnya: upstream filter "HANYA unpaid" → Order PAID LANGSUNG HILANG
+              //    (user bug 3: order QRIS bayar sukses langsung hilang dari list).
               //
-              //    FILTER KETAT upstream order: hanya yang BELUM LUNAS (unpaid) yang
-              //    boleh masuk normalized / storage / orderList.
-              //    Order PAID — APAPUN metodenya (QRIS/CASHIER) — BUANG dari active session.
-              //    Helper functions dipindahkan ke component scope (atas) agar legal menurut strict ES5.
-
-              const unpaidUpstream = (orders as any[]).filter((o) => !isOrderRecordPaid(o));
+              //    USER REQUST 30-MIN RETENTION: Order PAID TETAP MUNCUL 30 MENIT PERTAMA.
+              //    FILTER SEKARANG: HANYA BUANG order yang (PAID && LEBIH DARI 30 MENIT).
+              //    Yang tersisa: semua order unpaid + paid masih dalam 30 menit retention.
+              const nowMsForRetention = Date.now();
+              const keepableOrders = (orders as any[]).filter((o) =>
+                isOrderPaidStillWithinRetention(o, nowMsForRetention)
+              );
+              // Upstream ada PAID (sebagian / seluruhnya):
               const upstreamHasAnyPaid = (orders as any[]).some((o) => isOrderRecordPaid(o));
+              // unpaidUpstream = dari keepableOrders yang unpaid (dipakai untuk safeToPurgeAll check):
+              const unpaidUpstream = keepableOrders.filter((o) => !isOrderRecordPaid(o));
 
               // 🔴 🔴 CRITICAL HOTFIX (PAYMENT BANNER STATE LOCK "SUDAH LUNAS" PADAHAL ADA
               //    ORDER TAMBAHAN BARU YANG UNPAID Rp 10.000):
@@ -697,17 +745,27 @@ export default function HomePage({ forcedMode }: HomePageClientProps = {}) {
                 return false;
               });
               const localCartNotEmpty = Array.isArray(cart) && cart.length > 0 && cart.some((c) => Number(c.quantity || 0) > 0);
+              // 🔴 FIX BUG 1 (QRIS MODAL TERTUTUP):
+              //    Tambah 2 syarat SAFETY:
+              //      (A) !isCheckoutOpen — user BUKA modal pilih metode bayar (QRIS/Kasir)
+              //          → PURGE DITUNDA sampai user selesai checkout / tutup modal.
+              //      (B) !isQrisFlowOpen — user BUKA QRIS flow (Step1/Step2) → PURGE ditunda.
+              //    Ini TIDAK AKAN menjalankan setIsCheckoutOpen(false) / setIsQrisFlowOpen(false)
+              //    dari purge body → user TIDAK akan lihat "module langsung tertutup" setelah
+              //    klik "Bayar QRIS" (sblmnya purge karena upstream ada order PAID).
+              const checkoutsModalOpen = Boolean(isCheckoutOpen || isQrisFlowOpen);
               const safeToPurgeAll =
                 unpaidUpstream.length === 0 &&
                 orders.length > 0 &&
                 upstreamHasAnyPaid &&
                 !localHasAnyUnpaidItems &&
-                !localCartNotEmpty;
+                !localCartNotEmpty &&
+                !checkoutsModalOpen;
 
               let shouldPurgeStorageTotal = safeToPurgeAll;
 
-              // Step 2: Normalize fresh (HANYA unpaid yang masuk normalized)
-              const normalized: OrderRecord[] = unpaidUpstream.map((o) => ({
+              // Step 2: Normalize fresh (keepableOrders = unpaid + paid retention 30min):
+              const normalized: OrderRecord[] = keepableOrders.map((o) => ({
                 submissionId:
                   String(o.submissionId || "").trim() || generateSubmissionId(),
                 orderId: o.orderId ?? o.id ?? undefined,
@@ -782,8 +840,10 @@ export default function HomePage({ forcedMode }: HomePageClientProps = {}) {
                 } catch (_) {}
                 setOrderList([]);
                 setIsAwaitingPaymentConfirmation(false);
-                setIsQrisFlowOpen(false);
-                setIsCheckoutOpen(false);
+                // 🔴 FIX BUG 1 DOUBLE GUARD: safeToPurgeAll SUDAH check !isCheckoutOpen
+                //    dan !isQrisFlowOpen (line safeToPurgeAll). tapi TETAP JANGAN CLOSE
+                //    disini (redundan) → biarkan user yang klik Tutup / Selesaikan
+                //    (tidak setIsCheckoutOpen(false) / setIsQrisFlowOpen(false)).
                 setActiveTab("menu");
                 setCustomerNameInput("");
                 setPaymentMethod("CASHIER");
@@ -827,23 +887,20 @@ export default function HomePage({ forcedMode }: HomePageClientProps = {}) {
               } else {
                 // Step 5: Gabung (merge) existing STORED yg sudah ada items dengan upstream
                 //          (upstream acak waktu empty karena Bridge cache baru di-setting)
-                // 🔴 EXTRA SAFETY: Saat merge, FILTER currentStored yang SUDAH PAID juga
-                //    (jika user sebelumnya sudah bayar via simulasi lunas tapi storage
-                //    belum ke-clear karena refresh page).
-                const paidStored = currentStored.filter((s) =>
-                  isOrderRecordPaid({
-                    paymentMethod: s.paymentMethod,
-                    ackStatus: s.ackStatus,
-                  })
+                // 🔴 EXTRA SAFETY 30-MIN RETENTION: Saat merge, BUANG HANYA order yang
+                //    PAID + LEBIH DARI 30 MENIT. JANGAN BUANG paid yang masih retention
+                //    (user bug 3: order lunas harus tetap muncul 30 menit).
+                const stalePaidToRemove = new Set(
+                  currentStored
+                    .filter((s) => isOrderStaleAndPaidShouldPurge(s, nowMsForRetention))
+                    .map((s) => String(s.submissionId || "").trim() + "|" + String(s.orderIndex || "")),
                 );
                 let cleanCurrent = currentStored;
-                if (paidStored.length > 0) {
-                  cleanCurrent = currentStored.filter((s) =>
-                    !isOrderRecordPaid({
-                      paymentMethod: s.paymentMethod,
-                      ackStatus: s.ackStatus,
-                    })
-                  );
+                if (stalePaidToRemove.size > 0) {
+                  cleanCurrent = currentStored.filter((s) => {
+                    const key = String(s.submissionId || "").trim() + "|" + String(s.orderIndex || "");
+                    return !stalePaidToRemove.has(key);
+                  });
                 }
                 const merged = [...cleanCurrent];
                 for (const n of normalized) {
@@ -2518,14 +2575,31 @@ export default function HomePage({ forcedMode }: HomePageClientProps = {}) {
             <div className="mt-2 flex items-center justify-between">
               <p className="text-xs text-amber-700">
                 ⏳ Silakan selesaikan di kasir.
+                {(() => {
+                  let oldestUnpaidMs = Number.POSITIVE_INFINITY;
+                  for (const o of sortedOrderList) {
+                    if (isOrderRecordPaid(o)) continue;
+                    const t = getOrderCreatedAtMs(o);
+                    if (t > 0 && t < oldestUnpaidMs) oldestUnpaidMs = t;
+                  }
+                  if (!Number.isFinite(oldestUnpaidMs) || oldestUnpaidMs > 1e17) return "";
+                  const waitRemainMs = SIMULASI_LUNAS_MIN_WAIT_MS - (Date.now() - oldestUnpaidMs);
+                  if (waitRemainMs <= 0) return "";
+                  const remainSec = Math.ceil(waitRemainMs / 1000);
+                  return ` Simulasi tersedia ${remainSec}s lagi.`;
+                })()}
               </p>
-              <button
-                type="button"
-                onClick={handleCompletePaymentSuccess}
-                className="rounded-lg border border-emerald-200 bg-emerald-50 px-3 py-1.5 text-[11px] font-bold text-emerald-700 hover:bg-emerald-100"
-              >
-                (Simulasi Lunas)
-              </button>
+              {
+                isOrderOldEnoughToShowSimulateLunas(sortedOrderList) ? (
+                  <button
+                    type="button"
+                    onClick={handleCompletePaymentSuccess}
+                    className="rounded-lg border border-emerald-200 bg-emerald-50 px-3 py-1.5 text-[11px] font-bold text-emerald-700 hover:bg-emerald-100"
+                  >
+                    (Simulasi Lunas)
+                  </button>
+                ) : null
+              }
             </div>
           ) : null}
         </div>
