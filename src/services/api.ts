@@ -680,7 +680,12 @@ export async function getPublicSettings(
         : typeof allowFromRoot === "boolean"
         ? allowFromRoot
         : true,
-    isPaymentProofMandatory: false,
+    isPaymentProofMandatory:
+      typeof mandatoryFromData === "boolean"
+        ? mandatoryFromData
+        : typeof mandatoryFromRoot === "boolean"
+        ? mandatoryFromRoot
+        : true,
     receiptFooter,
   };
 }
@@ -1118,7 +1123,7 @@ export async function submitOrderWithPosQueueAck(
       };
     }
 
-    reportProgress(50, "Menunggu konfirmasi print...", queueEtaFromHeader ?? 35);
+    reportProgress(50, "Menunggu konfirmasi print...", queueEtaFromBody ?? queueEtaFromHeader ?? BASE_ETA_FALLBACK_SECONDS);
 
     const pollResult = await pollOrderAckStatus({
       tenantId: restInput.tenantId,
@@ -1128,7 +1133,8 @@ export async function submitOrderWithPosQueueAck(
       maxSeconds: 35,
       onTick: (remaining) => {
         const elapsedMs = Date.now() - startTime;
-        const totalMs = Math.max(elapsedMs + remaining * 1000, 1);
+        const baseEtaTotal = Math.max(queueEtaFromBody ?? queueEtaFromHeader ?? BASE_ETA_FALLBACK_SECONDS, BASE_ETA_FALLBACK_SECONDS);
+        const totalMs = Math.max(baseEtaTotal * 1000, elapsedMs + remaining * 1000, 1);
         const pct = Math.min(95, Math.max(50, Math.floor((elapsedMs / totalMs) * 100)));
         reportProgress(pct, "Menunggu konfirmasi print...", remaining);
       },
@@ -1331,4 +1337,100 @@ export async function uploadQrOrderPaymentProof({
     ...json,
     success: true,
   };
+}
+
+export type ReplayTransactionOrderResponse = {
+  ok: boolean;
+  success?: boolean;
+  message: string;
+  transactionId?: string | null;
+  submissionId?: string | null;
+  ackStatus?: string | null;
+  socket?: unknown;
+  orderId?: unknown;
+  emittedAt?: string;
+  retryAvailable?: boolean;
+  error?: string;
+};
+
+export async function replayStuckTransactionOrder({
+  tenantId,
+  branchId,
+  transactionId,
+  submissionId,
+}: {
+  tenantId: string;
+  branchId?: string;
+  transactionId?: string;
+  submissionId?: string;
+}): Promise<ReplayTransactionOrderResponse> {
+  try {
+    const hasTxId = typeof transactionId === "string" && transactionId.trim().length > 0;
+    const hasSubId = typeof submissionId === "string" && submissionId.trim().length > 0;
+    if (!hasTxId && !hasSubId) {
+      return {
+        ok: false,
+        message: "Transaction ID atau Submission ID wajib diisi untuk replay order ke POS.",
+        retryAvailable: false,
+      };
+    }
+
+    let url: string;
+    if (hasTxId) {
+      url = `${BRIDGE_API_URL}/api/v1/relay/replay/by-transaction/${encodeURIComponent(transactionId!.trim())}`;
+    } else {
+      url = `${BRIDGE_API_URL}/api/v1/relay/replay/by-submission/${encodeURIComponent(submissionId!.trim())}`;
+    }
+
+    const bodyPayload: Record<string, string | undefined> = {
+      tenantId,
+      tenant_id: tenantId,
+    };
+    if (branchId?.trim()) {
+      bodyPayload.branchId = branchId.trim();
+      bodyPayload.branch_id = branchId.trim();
+    }
+    if (hasTxId) bodyPayload.transactionId = transactionId!.trim();
+    if (hasSubId) bodyPayload.submissionId = submissionId!.trim();
+
+    const { response, json } = await fetchJson<ReplayTransactionOrderResponse>(
+      url,
+      {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "X-Tenant-Id": tenantId,
+          "X-Internal-Relay": "1",
+        },
+        body: JSON.stringify(bodyPayload),
+      },
+      NETWORK_WIFI_ERROR_MESSAGE,
+    );
+
+    if (!response.ok) {
+      const message =
+        typeof json === "object" && json !== null && typeof (json as ReplayTransactionOrderResponse).message === "string"
+          ? (json as ReplayTransactionOrderResponse).message
+          : `Replay order gagal (HTTP ${response.status}). Silakan submit order baru dari halaman menu jika order lebih dari 30 menit.`;
+      return {
+        ok: false,
+        message,
+        retryAvailable: true,
+        error: message,
+      };
+    }
+
+    return {
+      ok: true,
+      retryAvailable: false,
+      ...(typeof json === "object" && json !== null ? (json as ReplayTransactionOrderResponse) : { message: "Replay order dikirim ke POS." }),
+    };
+  } catch (err) {
+    return {
+      ok: false,
+      retryAvailable: true,
+      message: err instanceof Error ? err.message : "Koneksi terputus saat replay order ke POS.",
+      error: err instanceof Error ? err.message : "Terjadi kesalahan tak terduga.",
+    };
+  }
 }

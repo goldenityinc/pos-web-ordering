@@ -17,6 +17,7 @@ import {
   updateQrisImage,
   SubmitOrderResponse,
   uploadQrOrderPaymentProof,
+  replayStuckTransactionOrder,
 } from "../services/api";
 import { resolveOrderItemProductId } from "../services/order-utils.js";
 import { useCart } from "../contexts/cart-context";
@@ -425,7 +426,7 @@ export default function HomePage({ forcedMode }: HomePageClientProps = {}) {
         const settings = await getPublicSettings(tenantId, branchId);
         setQrisImageUrl(settings.qrisImageUrl);
         setAllowPayAtCashier(settings.allowPayAtCashier !== false);
-        setIsPaymentProofMandatory(false);
+        setIsPaymentProofMandatory(settings.isPaymentProofMandatory !== false);
         setSettingsReceiptFooter(settings.receiptFooter || DEFAULT_RECEIPT_FOOTER);
         if (settings.allowPayAtCashier === false) {
           setPaymentMethod("QRIS");
@@ -436,7 +437,7 @@ export default function HomePage({ forcedMode }: HomePageClientProps = {}) {
         setQrisLoadError(message);
         setQrisImageUrl(null);
         setAllowPayAtCashier(true);
-        setIsPaymentProofMandatory(false);
+        setIsPaymentProofMandatory(true);
         setSettingsReceiptFooter(DEFAULT_RECEIPT_FOOTER);
       }
     };
@@ -1323,6 +1324,37 @@ export default function HomePage({ forcedMode }: HomePageClientProps = {}) {
         failureMessage: err instanceof Error ? err.message : "Gagal mengirim ulang.",
         retryPayload: submitPayload,
       }));
+    } finally {
+      setIsSubmitting(false);
+    }
+  };
+
+  const handleReplayOrderCard = async (submissionId: string) => {
+    const order = orderList.find((o) => o.submissionId === submissionId);
+    if (!order) {
+      showSnackbar("Order tidak ditemukan di daftar order lokal, silakan refresh halaman.", "error");
+      return;
+    }
+    const txId = order.transactionId || activeTransactionId;
+    if (!txId && !order.submissionId) {
+      showSnackbar("Order ID untuk sinkron tidak ditemukan.", "error");
+      return;
+    }
+    setIsSubmitting(true);
+    try {
+      const result = await replayStuckTransactionOrder({
+        tenantId: order.tenantId || tenantId,
+        branchId: order.branchId || branchId,
+        transactionId: txId,
+        submissionId: order.submissionId,
+      });
+      if (result?.ok) {
+        showSnackbar(result?.message || "Sinkron ke POS berhasil, order akan keluar di POS dalam beberapa detik.", "success");
+      } else {
+        showSnackbar(result?.message || "Sinkron ke POS gagal, coba kirim ulang nanti atau submit order baru.", "error");
+      }
+    } catch (err) {
+      showSnackbar(err instanceof Error ? err.message : "Kesalahan saat sinkron ke POS.", "error");
     } finally {
       setIsSubmitting(false);
     }
@@ -2364,7 +2396,16 @@ export default function HomePage({ forcedMode }: HomePageClientProps = {}) {
 
                       <div className="mt-3 flex items-center justify-between border-t border-slate-100 pt-3">
                         <span className="text-xs text-slate-500">Subtotal</span>
-                        <div className="flex items-center gap-2">
+                        <div className="flex items-center gap-2 flex-wrap justify-end">
+                          <button
+                            type="button"
+                            onClick={() => handleReplayOrderCard(order.submissionId)}
+                            disabled={isSubmitting}
+                            className="rounded-lg border border-sky-200 bg-sky-50 px-3 py-1.5 text-xs font-bold text-sky-700 hover:bg-sky-100 disabled:cursor-not-allowed disabled:opacity-60"
+                            title="Sinkron ulang order ke POS jika Meja masih kosong di POS"
+                          >
+                            ↻ Sync ke POS
+                          </button>
                           {isFailed || needAckBadge ? (
                             <button
                               type="button"
