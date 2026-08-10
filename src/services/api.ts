@@ -958,9 +958,14 @@ export async function submitOrderWithPosQueueAck(
     let response: Response;
     let rawJson: Record<string, unknown>;
     let queueEtaFromHeader: number | undefined;
+    let queueEtaFromBody: number | undefined;
+    const BASE_ETA_FALLBACK_SECONDS = 10;
 
     try {
-      reportProgress(15, "Mengirim ke kasir...", 30);
+      // 🔴 DYNAMIC ETA FIX (user exact request):
+      //    Initial fallback 10 detik jika TIDAK ADA ANTRIAN (queue empty),
+      //    jika ada antrian bridge kirim X-Queue-Eta header & etaNextQueue body.
+      reportProgress(15, "Mengirim ke kasir...", BASE_ETA_FALLBACK_SECONDS);
       response = await fetch(relayUrl, {
         method: "POST",
         headers: {
@@ -986,6 +991,24 @@ export async function submitOrderWithPosQueueAck(
         rawJson = (await response.json()) as Record<string, unknown>;
       } catch (_parseErr) {
         rawJson = {};
+      }
+      // Extract etaNextQueue dari body jika ada (prioritas #1, lalu header, lalu fallback 10):
+      const rawEtaBody =
+        (rawJson && typeof rawJson === "object" && (rawJson as any).etaNextQueue != null)
+          ? (rawJson as any).etaNextQueue
+          : (rawJson && typeof rawJson === "object" && typeof (rawJson as any).data === "object" && (rawJson as any).data?.etaNextQueue != null)
+          ? (rawJson as any).data.etaNextQueue
+          : undefined;
+      if (rawEtaBody != null) {
+        const pBody = Number(rawEtaBody);
+        if (Number.isFinite(pBody) && pBody > 0) queueEtaFromBody = pBody;
+      }
+      // Segera UPDATE progress ETA ke user DENGAN nilai real dari Bridge!
+      {
+        const actualEta = queueEtaFromBody ?? queueEtaFromHeader ?? BASE_ETA_FALLBACK_SECONDS;
+        if (actualEta) {
+          try { reportProgress(28, "Menunggu perangkat POS menerima pesanan...", actualEta); } catch (_) { /* noop */ }
+        }
       }
     } catch (fetchErr) {
       return {
