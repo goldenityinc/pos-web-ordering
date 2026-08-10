@@ -2713,8 +2713,13 @@ export default function HomePage({ forcedMode }: HomePageClientProps = {}) {
                       <button
                         type="button"
                         onClick={() => setIsQrisFlowOpen(false)}
-                        disabled={isSubmitting || isQrisPaymentUploading}
-                        className="rounded-xl border border-slate-200 bg-white px-4 py-3 text-sm font-semibold text-slate-700"
+                        disabled={isSubmitting || isQrisPaymentUploading || qrisFirstStepCompleted}
+                        className={
+                          "rounded-xl px-4 py-3 text-sm font-semibold transition " +
+                          (qrisFirstStepCompleted
+                            ? "cursor-not-allowed border border-slate-100 bg-slate-50 text-slate-400 opacity-50"
+                            : "border border-slate-200 bg-white text-slate-700")
+                        }
                       >
                         Kembali
                       </button>
@@ -2724,8 +2729,7 @@ export default function HomePage({ forcedMode }: HomePageClientProps = {}) {
                           disabled={
                             isSubmitting ||
                             isQrisPaymentUploading ||
-                            !pendingQrisOrder?.orderId ||
-                            (isPaymentProofMandatory && !paymentProofFile)
+                            !pendingQrisOrder?.orderId
                           }
                           onClick={() => void handleSubmitQrisPaymentProof()}
                           className="rounded-xl bg-emerald-600 px-4 py-3 text-sm font-bold text-white shadow-sm transition hover:bg-emerald-700 disabled:cursor-not-allowed disabled:opacity-70"
