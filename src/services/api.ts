@@ -685,7 +685,7 @@ export async function getPublicSettings(
         ? mandatoryFromData
         : typeof mandatoryFromRoot === "boolean"
         ? mandatoryFromRoot
-        : true,
+        : false,
     receiptFooter,
   };
 }
@@ -1125,6 +1125,11 @@ export async function submitOrderWithPosQueueAck(
 
     reportProgress(50, "Menunggu konfirmasi print...", queueEtaFromBody ?? queueEtaFromHeader ?? BASE_ETA_FALLBACK_SECONDS);
 
+    const resolvedDisplayEta = Math.max(
+      queueEtaFromBody ?? queueEtaFromHeader ?? BASE_ETA_FALLBACK_SECONDS,
+      BASE_ETA_FALLBACK_SECONDS,
+    );
+
     const pollResult = await pollOrderAckStatus({
       tenantId: restInput.tenantId,
       branchId: restInput.branchId,
@@ -1136,7 +1141,11 @@ export async function submitOrderWithPosQueueAck(
         const baseEtaTotal = Math.max(queueEtaFromBody ?? queueEtaFromHeader ?? BASE_ETA_FALLBACK_SECONDS, BASE_ETA_FALLBACK_SECONDS);
         const totalMs = Math.max(baseEtaTotal * 1000, elapsedMs + remaining * 1000, 1);
         const pct = Math.min(95, Math.max(50, Math.floor((elapsedMs / totalMs) * 100)));
-        reportProgress(pct, "Menunggu konfirmasi print...", remaining);
+        // 🔴 FIX DISPLAY ETA (Bukan pakai remaining polling countdown 35s → selalu 30/35 detik ke user)
+        //    remaining = sisa detik POLLING LOOP countdown maxSeconds=35, BUKAN perkiraan ETA pesanan.
+        //    Pakai resolvedDisplayEta (actualEta from bridge atau base 10 detik jika tanpa antrian) → user lihat 10/25/40 sesuai kecepatan antrian.
+        const displayEtaRemainingCountdown = Math.max(0, Math.min(remaining, resolvedDisplayEta));
+        reportProgress(pct, "Menunggu konfirmasi print...", displayEtaRemainingCountdown);
       },
     });
 

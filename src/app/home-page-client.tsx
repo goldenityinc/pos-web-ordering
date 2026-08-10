@@ -426,7 +426,7 @@ export default function HomePage({ forcedMode }: HomePageClientProps = {}) {
         const settings = await getPublicSettings(tenantId, branchId);
         setQrisImageUrl(settings.qrisImageUrl);
         setAllowPayAtCashier(settings.allowPayAtCashier !== false);
-        setIsPaymentProofMandatory(settings.isPaymentProofMandatory !== false);
+        setIsPaymentProofMandatory(settings.isPaymentProofMandatory === true);
         setSettingsReceiptFooter(settings.receiptFooter || DEFAULT_RECEIPT_FOOTER);
         if (settings.allowPayAtCashier === false) {
           setPaymentMethod("QRIS");
@@ -437,7 +437,7 @@ export default function HomePage({ forcedMode }: HomePageClientProps = {}) {
         setQrisLoadError(message);
         setQrisImageUrl(null);
         setAllowPayAtCashier(true);
-        setIsPaymentProofMandatory(true);
+        setIsPaymentProofMandatory(false);
         setSettingsReceiptFooter(DEFAULT_RECEIPT_FOOTER);
       }
     };
