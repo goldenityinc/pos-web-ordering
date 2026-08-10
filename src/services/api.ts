@@ -1221,13 +1221,15 @@ export type UploadQrPaymentProofResponse = {
 export async function uploadQrOrderPaymentProof({
   tenantId,
   orderId,
+  transactionId,
   branchId,
   paymentProofFile,
   paymentProofUrl,
   paymentMethod,
 }: {
   tenantId: string;
-  orderId: string | number;
+  orderId?: string | number;
+  transactionId?: string | number;
   branchId?: string;
   paymentProofFile?: File | null;
   paymentProofUrl?: string;
@@ -1236,15 +1238,20 @@ export async function uploadQrOrderPaymentProof({
   if (!tenantId) {
     throw new Error("tenantId is required to upload payment proof.");
   }
-  if (!orderId) {
-    throw new Error("orderId is required to upload payment proof.");
+  const hasOrderRef = Boolean(orderId || transactionId);
+  if (!hasOrderRef) {
+    throw new Error("orderId or transactionId is required to upload payment proof.");
   }
   if (!paymentProofFile && !paymentProofUrl) {
     throw new Error("paymentProofFile or paymentProofUrl must be provided.");
   }
 
-  const orderIdStr = String(orderId).trim();
-  const url = `${BRIDGE_API_URL}/api/v1/relay/qr-orders/${encodeURIComponent(orderIdStr)}/payment`;
+  const orderIdStr = orderId != null ? String(orderId).trim() : "";
+  const txIdStr = transactionId != null ? String(transactionId).trim() : "";
+  // Build by-order OR by-transaction endpoint
+  const url = orderIdStr
+    ? `${BRIDGE_API_URL}/api/v1/relay/qr-orders/${encodeURIComponent(orderIdStr)}/payment`
+    : `${BRIDGE_API_URL}/api/v1/relay/qr-orders/by-transaction/${encodeURIComponent(txIdStr)}/payment`;
   const normalizedMethod = (paymentMethod || "QRIS").toString().trim();
 
   let response: Response;
@@ -1257,6 +1264,10 @@ export async function uploadQrOrderPaymentProof({
     if (branchId?.trim()) {
       formData.append("branchId", branchId.trim());
       formData.append("branch_id", branchId.trim());
+    }
+    if (txIdStr) {
+      formData.append("transactionId", txIdStr);
+      formData.append("transaction_id", txIdStr);
     }
     formData.append("paymentMethod", normalizedMethod);
     formData.append("payment_method", normalizedMethod);
@@ -1282,6 +1293,8 @@ export async function uploadQrOrderPaymentProof({
       tenant_id: tenantId,
       branchId: branchId?.trim() || undefined,
       branch_id: branchId?.trim() || undefined,
+      transactionId: txIdStr || undefined,
+      transaction_id: txIdStr || undefined,
       paymentMethod: normalizedMethod,
       payment_method: normalizedMethod,
       payment_proof_url: paymentProofUrl?.trim(),
