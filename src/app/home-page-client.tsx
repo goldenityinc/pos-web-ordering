@@ -2643,16 +2643,12 @@ export default function HomePage({ forcedMode }: HomePageClientProps = {}) {
         </div>
       ) : null}
 
-      {!isSettingsOnlyMode ? (
+      {!isSettingsOnlyMode && activeTab === "menu" ? (
         <button
           type="button"
           onClick={handleOpenCheckout}
           disabled={displayCartSummary.itemCount === 0}
-          className={
-            activeTab === "menu"
-              ? "fixed bottom-4 left-1/2 z-40 w-[calc(100%-2rem)] max-w-md -translate-x-1/2 translate-y-0 rounded-2xl bg-slate-900 px-5 py-4 text-left text-white shadow-xl ring-1 ring-black/10 transition disabled:cursor-not-allowed disabled:opacity-40"
-              : "relative left-auto z-10 mx-auto mb-6 mt-4 w-[calc(100%-2rem)] max-w-md translate-x-0 rounded-2xl bg-slate-900 px-5 py-4 text-left text-white shadow-lg ring-1 ring-black/10 transition disabled:cursor-not-allowed disabled:opacity-40"
-          }
+          className="fixed bottom-4 left-1/2 z-40 w-[calc(100%-2rem)] max-w-md -translate-x-1/2 translate-y-0 rounded-2xl bg-slate-900 px-5 py-4 text-left text-white shadow-xl ring-1 ring-black/10 transition disabled:cursor-not-allowed disabled:opacity-40"
         >
           <p className="text-sm font-semibold">
             {displayCartSummary.itemCount} items | {rupiahFormatter.format(displayCartSummary.total)}
