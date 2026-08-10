@@ -1269,7 +1269,7 @@ export default function HomePage({ forcedMode }: HomePageClientProps = {}) {
       isOpen: true,
       progressPct: 5,
       stageMessage: "Mengirim ulang pesanan...",
-      etaSeconds: 35,
+      etaSeconds: 10,
       isFailed: false,
       submissionId: order.submissionId,
       transactionId: txId,
@@ -1489,7 +1489,7 @@ export default function HomePage({ forcedMode }: HomePageClientProps = {}) {
       isOpen: true,
       progressPct: 0,
       stageMessage: "Menyiapkan pesanan...",
-      etaSeconds: 35,
+      etaSeconds: 10,
       isFailed: false,
       submissionId,
       transactionId,
@@ -1605,7 +1605,7 @@ export default function HomePage({ forcedMode }: HomePageClientProps = {}) {
               resolvedDeviceUuid: response.resolvedDeviceUuid,
             };
             setPendingQrisOrder({
-              orderId: response.orderId ? String(response.orderId) : "",
+              orderId: response.orderId ? String(response.orderId) : undefined,
               submissionId,
               transactionId,
               receiptNumber: response.receiptNumber,
@@ -1827,7 +1827,8 @@ export default function HomePage({ forcedMode }: HomePageClientProps = {}) {
 
   const handleSubmitQrisPaymentProof = async () => {
     if (isQrisPaymentUploading || isSubmitting) return;
-    if (!pendingQrisOrder?.orderId) {
+    const hasOrderRef = Boolean(pendingQrisOrder?.orderId || pendingQrisOrder?.transactionId);
+    if (!hasOrderRef) {
       setSubmitError("Order ID tidak ditemukan, ulangi proses checkout.");
       return;
     }
@@ -1847,7 +1848,8 @@ export default function HomePage({ forcedMode }: HomePageClientProps = {}) {
       const result = await uploadQrOrderPaymentProof({
         tenantId,
         branchId: branchId || undefined,
-        orderId: pendingQrisOrder.orderId,
+        orderId: pendingQrisOrder?.orderId,
+        transactionId: pendingQrisOrder?.transactionId,
         paymentProofFile,
         paymentMethod: "QRIS",
       });
@@ -2523,7 +2525,7 @@ export default function HomePage({ forcedMode }: HomePageClientProps = {}) {
       </section>
 
       {!isSettingsOnlyMode && activeTab === "orderList" && hasAnyOrder ? (
-        <div className="fixed bottom-0 left-1/2 z-40 w-full max-w-md -translate-x-1/2 border-t border-slate-200 bg-white px-4 py-3 shadow-[0_-6px_16px_rgba(0,0,0,0.08)]">
+        <div className="relative mx-auto mt-2 w-full max-w-md border-t border-slate-200 bg-white px-4 py-3">
           <div className="flex items-center justify-between gap-3">
             <div>
               <p className="text-xs font-semibold uppercase tracking-wide text-slate-500">
@@ -2610,9 +2612,7 @@ export default function HomePage({ forcedMode }: HomePageClientProps = {}) {
           type="button"
           onClick={handleOpenCheckout}
           disabled={displayCartSummary.itemCount === 0}
-          className={`fixed left-1/2 z-40 w-[calc(100%-2rem)] max-w-md -translate-x-1/2 rounded-2xl bg-slate-900 px-5 py-4 text-left text-white shadow-lg ring-1 ring-black/10 transition ${
-            activeTab === "orderList" && hasAnyOrder ? (orderPaymentFlags.showPayButton ? "bottom-20" : "bottom-24") : "bottom-4"
-          }`}
+          className="relative left-auto z-10 mx-auto mb-6 mt-4 w-[calc(100%-2rem)] max-w-md translate-x-0 rounded-2xl bg-slate-900 px-5 py-4 text-left text-white shadow-lg ring-1 ring-black/10 transition disabled:cursor-not-allowed disabled:opacity-40"
         >
           <p className="text-sm font-semibold">
             {displayCartSummary.itemCount} items | {rupiahFormatter.format(displayCartSummary.total)}
@@ -2803,7 +2803,7 @@ export default function HomePage({ forcedMode }: HomePageClientProps = {}) {
                           disabled={
                             isSubmitting ||
                             isQrisPaymentUploading ||
-                            !pendingQrisOrder?.orderId
+                            (!pendingQrisOrder?.orderId && !pendingQrisOrder?.transactionId)
                           }
                           onClick={() => void handleSubmitQrisPaymentProof()}
                           className="rounded-xl bg-emerald-600 px-4 py-3 text-sm font-bold text-white shadow-sm transition hover:bg-emerald-700 disabled:cursor-not-allowed disabled:opacity-70"
