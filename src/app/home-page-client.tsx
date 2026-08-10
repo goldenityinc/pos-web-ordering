@@ -245,6 +245,11 @@ export default function HomePage({ forcedMode }: HomePageClientProps = {}) {
     etaSeconds: undefined,
     isFailed: false,
   });
+  // 🔴 Token trigger: BERUBAH HANYA SAAT onProgress callback dari submitOrderWithPosQueueAck update etaSeconds ke NILAI BARU (contoh 10→25 atau 25→40).
+  //    Dipakai sebagai dependency timer visual countdown setInterval, agar:
+  //    - SetInterval 1 detik HANYA di-create 1x KETIKA eta start value berubah
+  //    - Tidak infinite loop (jangan gunakan etaSeconds langsung atau Date.now per render)
+  const [etaStartToken, setEtaStartToken] = useState<string>("init");
   const [snackbar, setSnackbar] = useState<SnackbarState>({
     isOpen: false,
     message: "",
@@ -628,6 +633,28 @@ export default function HomePage({ forcedMode }: HomePageClientProps = {}) {
     }, 3500);
     return () => clearTimeout(t);
   }, [snackbar.isOpen, snackbar.message]);
+
+  // 🔴 FIX: VISUAL COUNTDOWN TIMER untuk Estimasi X detik di progress modal.
+  //    Masalah lama: etaSeconds HANYA di-update via onTick callback dari polling API (dipanggil setiap 1-2s).
+  //    Hasil: user lihat "Estimasi 10 detik" STUCK FROZEN di angka 10 selama berdetik-detik sebelum onTick dipanggil.
+  //    Solusi: Timer visual terpisah setInterval 1 detik, decrement etaSeconds otomatis sampai 0.
+  useEffect(() => {
+    if (!queueScreen.isOpen) return;
+    if (queueScreen.etaSeconds === undefined || queueScreen.etaSeconds === null) return;
+
+    const intervalMs = 1000;
+    const timer = setInterval(() => {
+      setQueueScreen((prev) => {
+        if (!prev.isOpen) return prev;
+        if (prev.etaSeconds === undefined || prev.etaSeconds === null) return prev;
+        if (prev.etaSeconds <= 0) return prev;
+        return { ...prev, etaSeconds: prev.etaSeconds - 1 };
+      });
+    }, intervalMs);
+
+    return () => clearInterval(timer);
+    // 🔴 Dependency: etaStartToken BERUBAH HANYA SAAT onProgress set NILAI ETA BARU (bukan per render).
+  }, [queueScreen.isOpen, etaStartToken]);
 
   useEffect(() => {
     if (!isMounted) return;
@@ -1282,12 +1309,19 @@ export default function HomePage({ forcedMode }: HomePageClientProps = {}) {
       const response = await submitOrderWithPosQueueAck({
         ...submitPayload,
         onProgress: (pct, stage, etaSec) => {
-          setQueueScreen((prev) => ({
-            ...prev,
-            progressPct: pct,
-            stageMessage: stage,
-            etaSeconds: etaSec ?? prev.etaSeconds,
-          }));
+          setQueueScreen((prev) => {
+            const newEta = etaSec ?? prev.etaSeconds;
+            // Jika etaSec BERUBAH dibanding value sebelumnya (contoh dari undefined ke 10, atau 10 ke 25) → trigger token baru = restart visual countdown setInterval.
+            if (typeof newEta === "number" && newEta !== prev.etaSeconds) {
+              setEtaStartToken(`eta-${newEta}-${Date.now().toString(36)}`);
+            }
+            return {
+              ...prev,
+              progressPct: pct,
+              stageMessage: stage,
+              etaSeconds: newEta,
+            };
+          });
         },
       });
 
@@ -1545,12 +1579,19 @@ export default function HomePage({ forcedMode }: HomePageClientProps = {}) {
       const response = await submitOrderWithPosQueueAck({
         ...submitPayload,
         onProgress: (pct, stage, etaSec) => {
-          setQueueScreen((prev) => ({
-            ...prev,
-            progressPct: pct,
-            stageMessage: stage,
-            etaSeconds: etaSec ?? prev.etaSeconds,
-          }));
+          setQueueScreen((prev) => {
+            const newEta = etaSec ?? prev.etaSeconds;
+            // Jika etaSec BERUBAH dibanding value sebelumnya (contoh dari undefined ke 10, atau 10 ke 25) → trigger token baru = restart visual countdown setInterval.
+            if (typeof newEta === "number" && newEta !== prev.etaSeconds) {
+              setEtaStartToken(`eta-${newEta}-${Date.now().toString(36)}`);
+            }
+            return {
+              ...prev,
+              progressPct: pct,
+              stageMessage: stage,
+              etaSeconds: newEta,
+            };
+          });
         },
       });
 

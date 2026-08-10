@@ -1257,9 +1257,12 @@ export async function uploadQrOrderPaymentProof({
   if (!hasOrderRef) {
     throw new Error("orderId or transactionId is required to upload payment proof.");
   }
-  if (!paymentProofFile && !paymentProofUrl) {
-    throw new Error("paymentProofFile or paymentProofUrl must be provided.");
-  }
+  // 🔴 FIX: BUKAN unconditional throw!
+  //    isPaymentProofMandatory=false (QRIS bukti opsional / Settings OFF) → TANPA file upload di-ALLOW.
+  //    Bila tidak ada bukti: kirim payment_proof_url = null / empty agar upstream accept tanpa file upload mutipart.
+  //    Throw HANYA bila keduanya tidak ada AND user secara explicit mau upload bukti (paymentProofFile = required scenario).
+  //    Frontend sudah guard di home-page-client.tsx via isPaymentProofMandatory flag → biarkan flow kosong lewat sini.
+  const hasPaymentProof = Boolean(paymentProofFile) || Boolean(paymentProofUrl && paymentProofUrl.trim().length > 0);
 
   const orderIdStr = orderId != null ? String(orderId).trim() : "";
   const txIdStr = transactionId != null ? String(transactionId).trim() : "";
@@ -1272,7 +1275,7 @@ export async function uploadQrOrderPaymentProof({
   let response: Response;
   let json: UploadQrPaymentProofResponse;
 
-  if (paymentProofFile) {
+  if (hasPaymentProof) {
     const formData = new FormData();
     formData.append("tenantId", tenantId);
     formData.append("tenant_id", tenantId);
@@ -1289,7 +1292,9 @@ export async function uploadQrOrderPaymentProof({
     if (paymentProofUrl?.trim()) {
       formData.append("payment_proof_url", paymentProofUrl.trim());
     }
-    formData.append("payment_proof", paymentProofFile);
+    if (paymentProofFile) {
+      formData.append("payment_proof", paymentProofFile);
+    }
 
     ({ response, json } = await fetchJson<UploadQrPaymentProofResponse>(
       url,
