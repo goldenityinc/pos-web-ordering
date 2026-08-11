@@ -11,6 +11,7 @@ const NETWORK_WIFI_ERROR_MESSAGE =
   "Koneksi terhalang, mohon gunakan paket data atau cek koneksi internet Anda.";
 
 const _pendingAckPolls = new Map<string, AbortController>();
+const _pendingSubmitOrders = new Map<string, Promise<any>>();
 
 export const DEFAULT_RECEIPT_FOOTER =
   "Barang yang sudah dibeli tidak dapat ditukar/dikembalikan";
@@ -995,6 +996,24 @@ export async function submitOrderWithPosQueueAck(
     }
   }
 
+  // 🔴 GLOBAL SUBMIT ORDER MUTEX: cegah DDoS sendiri dari DOUBLE CLICK user / 2 tab / 2 meja.
+  //    Key = combination of transactionId:submissionId:tableId:tenantId.
+  //    Jika function submit order YANG SAMA masih FLYING (promise blm resolve) → return promise SAMA (dedup).
+  //    User klik 5x bertubi dalam 200ms: hanya 1 request yang benar-benar terkirim.
+  const submitMutexKey = [
+    String(restInput.tenantId || "").trim(),
+    String(restInput.branchId || "").trim(),
+    String(restInput.tableId || restInput.table || "").trim(),
+    String(restInput.transactionId || "").trim(),
+    submissionId,
+  ].join("|");
+  const prev = _pendingSubmitOrders.get(submitMutexKey);
+  if (prev) {
+    // Return promise SAMA dengan yang sudah berjalan (deduplicate 100%).
+    return prev as Promise<any>;
+  }
+
+  const finalWork = (async () => {
   const relayUrl = `${BRIDGE_API_URL}/api/v1/relay/web-order`;
   const payloadItems = restInput.items ?? restInput.cartItems ?? [];
   const tableNum = restInput.tableNumber ?? restInput.table;
@@ -1281,6 +1300,16 @@ export async function submitOrderWithPosQueueAck(
       retryAvailable: true,
       error: err instanceof Error ? err.message : "Terjadi kesalahan tak terduga.",
     };
+  }
+  })();
+
+  _pendingSubmitOrders.set(submitMutexKey, finalWork);
+  try {
+    const finalResult = await finalWork;
+    return finalResult as any;
+  } finally {
+    const storedNow = _pendingSubmitOrders.get(submitMutexKey);
+    if (storedNow === finalWork) _pendingSubmitOrders.delete(submitMutexKey);
   }
 }
 

@@ -190,7 +190,7 @@ export default function HomePage({ forcedMode }: HomePageClientProps = {}) {
   const isSettingsMode =
     forcedMode === "settings" || mode === "settings" || searchParams.get("settings") === "1";
   const isSettingsOnlyMode = forcedMode === "settings";
-  const { addToCart, cart, clearCart, decreaseFromCart, updateItemNote } = useCart();
+  const { addToCart, cart, clearCart, decreaseFromCart, updateItemNote, setStorageScope, scopeKey, scope } = useCart();
 
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -204,8 +204,22 @@ export default function HomePage({ forcedMode }: HomePageClientProps = {}) {
   const [isQrisFlowOpen, setIsQrisFlowOpen] = useState(false);
   const [isQrisPreviewOpen, setIsQrisPreviewOpen] = useState(false);
   const [isMounted, setIsMounted] = useState(false);
-  const [customerNameInput, setCustomerNameInput] = useState("");
-  const [paymentMethod, setPaymentMethod] = useState<"CASHIER" | "QRIS">("CASHIER");
+  // 🔴 TASK 1: customerName dan paxCount SEKARANG NAMESPACE PER TABLE (bukan cuma per tx).
+  //    Storage key: APP_STORAGE_PREFIX + customerName_table:<scopeTableKey>
+  //    Ini mencegah STATE LEAK "Rina (Meja 2) muncul di Meja 1 Andre" (bug 4 user).
+  const scopeTableKey = `${tenantId.trim() || "t"}:${branchId.trim() || "b"}:${tableId.trim() || tableNumber.trim() || "x"}`.toLowerCase().replace(/[^a-z0-9_-]+/g, "-");
+  const customerNameInputStorageKey = `${APP_STORAGE_PREFIX}customerName_table:${scopeTableKey}`;
+  const paxCountInputStorageKey = `${APP_STORAGE_PREFIX}paxCount_table:${scopeTableKey}`;
+  const [customerNameInput, setCustomerNameInputState] = useState("");
+  const [paxCountInput, setPaxCountInputState] = useState<number | "">("");
+  const setCustomerNameInput = (next: string) => {
+    setCustomerNameInputState(next);
+    if (isMounted && tenantId) safeSetStorage(customerNameInputStorageKey, next || "");
+  };
+  const setPaxCountInput = (next: number | "") => {
+    setPaxCountInputState(next);
+    if (isMounted && tenantId) safeSetStorage(paxCountInputStorageKey, next === "" ? "" : String(next));
+  };
   const [allowPayAtCashier, setAllowPayAtCashier] = useState(true);
   const [isPaymentProofMandatory, setIsPaymentProofMandatory] = useState(true);
   const [qrisImageUrl, setQrisImageUrl] = useState<string | null>(null);
@@ -287,6 +301,17 @@ export default function HomePage({ forcedMode }: HomePageClientProps = {}) {
   //    → FORCE RESET SEMUA CACHE TRANSAKSI LAMA (scope = 1 browser tab 1 meja).
   useEffect(() => {
     if (!isMounted || !tenantId) return;
+    // 🔴 TASK 1a: LOCK CartProvider scope ke TABLE / TENANT / BRANCH YANG SEKARANG.
+    //    Pindah meja (tableId/tableNumber berubah) → CartProvider auto reload scope
+    //    yang bersesuaian → CART ISOLATED 100% ANTAR MEJA (TIDAK BOCOR Andre ke Rina).
+    try {
+      setStorageScope({
+        tenantId: tenantId.trim(),
+        branchId: branchId.trim(),
+        tableId: tableId.trim(),
+        tableNumber: tableNumber.trim(),
+      });
+    } catch (_e) {}
     try {
       const STORED_SCOPE_KEY = `${APP_STORAGE_PREFIX}currentSessionScope_v1`;
       const currentScope = {
@@ -302,6 +327,33 @@ export default function HomePage({ forcedMode }: HomePageClientProps = {}) {
       const storedIsEmpty = stored === "" || stored === "{}";
       const scopeMatches = !storedIsEmpty && stored === scopeStr;
       const scopeTableChanged = !scopeMatches && storedTxId !== "";
+
+      // 🔴 TASK 1b: RESET customerName / paxCount SAAT PINDAH MEJA (scope berubah).
+      //    Sebelumnya value state React (not yet persisted to scope storage) bocor.
+      if (!scopeMatches) {
+        const storedCust = safeGetStorage(customerNameInputStorageKey) || "";
+        setCustomerNameInputState(storedCust || "");
+        const storedPax = safeGetStorage(paxCountInputStorageKey);
+        if (storedPax === "" || storedPax === null || storedPax === undefined) {
+          setPaxCountInputState("");
+        } else {
+          const paxNum = Number(storedPax);
+          setPaxCountInputState(Number.isFinite(paxNum) && paxNum > 0 ? paxNum : "");
+        }
+      } else {
+        // Scope sudah match: hydrate state from scope storage (ada isinya, mis. user
+        // refresh tab browser dalam meja YANG SAMA)
+        const storedCust = safeGetStorage(customerNameInputStorageKey);
+        if (storedCust !== null && storedCust !== undefined) setCustomerNameInputState(storedCust || "");
+        const storedPax = safeGetStorage(paxCountInputStorageKey);
+        if (storedPax !== null && storedPax !== undefined) {
+          if (storedPax === "") setPaxCountInputState("");
+          else {
+            const paxNum = Number(storedPax);
+            setPaxCountInputState(Number.isFinite(paxNum) && paxNum > 0 ? paxNum : "");
+          }
+        }
+      }
 
       if (scopeTableChanged || storedIsEmpty) {
         if (storedTxId) {
@@ -321,6 +373,12 @@ export default function HomePage({ forcedMode }: HomePageClientProps = {}) {
               const key = localStorage.key(i);
               if (key && key.startsWith(APP_STORAGE_PREFIX) && !key.endsWith("SETTINGS_v1") && !key.endsWith("FOOTER_v1") && !key.endsWith("QRIS_URL_v1")) {
                 if (key === STORED_SCOPE_KEY) continue;
+                // 🔴 ISOLATION: JANGAN HAPUS cart customer pax yang milik SCOPE TABLE LAIN.
+                //    Hanya hapus transaksi / orderlist / current session (yang tidak
+                //    berawalan cart: / customerName_table: / paxCount_table:).
+                if (key.startsWith(`${APP_STORAGE_PREFIX}cart:`)) continue;
+                if (key.startsWith(`${APP_STORAGE_PREFIX}customerName_table:`)) continue;
+                if (key.startsWith(`${APP_STORAGE_PREFIX}paxCount_table:`)) continue;
                 keysToDelete.push(key);
               }
             }

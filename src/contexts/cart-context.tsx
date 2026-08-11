@@ -5,6 +5,7 @@ import {
   useContext,
   useEffect,
   useMemo,
+  useRef,
   useState,
   type ReactNode,
 } from "react";
@@ -13,6 +14,8 @@ import {
   safeRemoveStorage,
   safeSetStorage,
   WEB_ORDER_CART_STORAGE_KEY,
+  buildCartStorageKey,
+  type CartStorageKeyParams,
 } from "../lib/app-storage";
 
 export type CartItem = {
@@ -23,6 +26,9 @@ export type CartItem = {
 
 type CartContextValue = {
   cart: CartItem[];
+  scope: CartStorageKeyParams | null;
+  scopeKey: string | null;
+  setStorageScope: (scope: CartStorageKeyParams | null) => void;
   addToCart: (productId: string) => void;
   decreaseFromCart: (productId: string) => void;
   updateItemNote: (productId: string, note: string) => void;
@@ -54,16 +60,52 @@ function normalizeCartItem(value: unknown): CartItem | null {
   };
 }
 
-function getInitialCart(): CartItem[] {
+function buildScopeKey(scope: CartStorageKeyParams | null) {
+  if (!scope) return WEB_ORDER_CART_STORAGE_KEY;
+  const fromBuilder = buildCartStorageKey(scope);
+  return fromBuilder || WEB_ORDER_CART_STORAGE_KEY;
+}
+
+function loadCartFromScope(scope: CartStorageKeyParams | null): CartItem[] {
+  const key = buildScopeKey(scope);
   try {
-    const rawCart = safeGetStorage(WEB_ORDER_CART_STORAGE_KEY);
+    const rawCart = safeGetStorage(key);
     if (!rawCart) {
+      if (key !== WEB_ORDER_CART_STORAGE_KEY) {
+        // 🔴 ISOLATION FIRST-LOAD FALLBACK:
+        //    JIKA scope per-table BARU DIBUKA (kosong), cek apakah ada global
+        //    WEB_ORDER_CART_STORAGE_KEY yang masih punya sisa cart (sisa test lama).
+        //    HANYA COPY jika scope != global key, DAN global ada.
+        //    Setelah copy ke scope → hapus global key AGAR TIDAK BOCOR lagi ke
+        //    scope table LAINNYA.
+        const globalRaw = safeGetStorage(WEB_ORDER_CART_STORAGE_KEY);
+        if (globalRaw) {
+          try {
+            const parsedGlobal = JSON.parse(globalRaw) as unknown;
+            if (Array.isArray(parsedGlobal)) {
+              const normalized = parsedGlobal
+                .map((item) => normalizeCartItem(item))
+                .filter((item): item is CartItem => Boolean(item));
+              if (normalized.length > 0) {
+                try { safeSetStorage(key, JSON.stringify(normalized)); } catch (_) {}
+                safeRemoveStorage(WEB_ORDER_CART_STORAGE_KEY);
+                return normalized;
+              }
+              safeRemoveStorage(WEB_ORDER_CART_STORAGE_KEY);
+            } else {
+              safeRemoveStorage(WEB_ORDER_CART_STORAGE_KEY);
+            }
+          } catch (_err2) {
+            safeRemoveStorage(WEB_ORDER_CART_STORAGE_KEY);
+          }
+        }
+      }
       return [];
     }
 
     const parsedCart = JSON.parse(rawCart) as unknown;
     if (!Array.isArray(parsedCart)) {
-      safeRemoveStorage(WEB_ORDER_CART_STORAGE_KEY);
+      safeRemoveStorage(key);
       return [];
     }
 
@@ -71,7 +113,7 @@ function getInitialCart(): CartItem[] {
       .map((item) => normalizeCartItem(item))
       .filter((item): item is CartItem => Boolean(item));
   } catch (_error) {
-    safeRemoveStorage(WEB_ORDER_CART_STORAGE_KEY);
+    safeRemoveStorage(key);
     return [];
   }
 }
@@ -81,13 +123,20 @@ type CartProviderProps = {
 };
 
 export function CartProvider({ children }: CartProviderProps) {
+  const [scope, setScope] = useState<CartStorageKeyParams | null>(null);
   const [cart, setCart] = useState<CartItem[]>([]);
   const [hasLoadedCart, setHasLoadedCart] = useState(false);
+  const scopeKey = useMemo(() => buildScopeKey(scope), [scope]);
+  const prevScopeKeyRef = useRef<string | null>(null);
 
   useEffect(() => {
-    setCart(getInitialCart());
+    if (prevScopeKeyRef.current === scopeKey && hasLoadedCart) {
+      return;
+    }
+    prevScopeKeyRef.current = scopeKey;
+    setCart(loadCartFromScope(scope));
     setHasLoadedCart(true);
-  }, []);
+  }, [scopeKey, scope, hasLoadedCart]);
 
   useEffect(() => {
     if (!hasLoadedCart) {
@@ -95,15 +144,27 @@ export function CartProvider({ children }: CartProviderProps) {
     }
 
     try {
-      safeSetStorage(WEB_ORDER_CART_STORAGE_KEY, JSON.stringify(cart));
+      safeSetStorage(scopeKey, JSON.stringify(cart));
     } catch (_error) {
-      safeRemoveStorage(WEB_ORDER_CART_STORAGE_KEY);
+      safeRemoveStorage(scopeKey);
     }
-  }, [cart, hasLoadedCart]);
+  }, [cart, hasLoadedCart, scopeKey]);
 
   const value = useMemo<CartContextValue>(
     () => ({
       cart,
+      scope,
+      scopeKey,
+      setStorageScope: (nextScope: CartStorageKeyParams | null) => {
+        setScope((prevScope) => {
+          const nextKey = buildScopeKey(nextScope);
+          const prevKey = buildScopeKey(prevScope);
+          if (prevKey === nextKey && prevScope === nextScope) {
+            return prevScope;
+          }
+          return nextScope;
+        });
+      },
       addToCart: (productId: string) => {
         setCart((previousCart) => {
           const existingItem = previousCart.find((item) => item.productId === productId);
@@ -144,11 +205,11 @@ export function CartProvider({ children }: CartProviderProps) {
         );
       },
       clearCart: () => {
-        safeRemoveStorage(WEB_ORDER_CART_STORAGE_KEY);
+        safeRemoveStorage(scopeKey);
         setCart([]);
       },
     }),
-    [cart],
+    [cart, scope, scopeKey],
   );
 
   return <CartContext.Provider value={value}>{children}</CartContext.Provider>;
