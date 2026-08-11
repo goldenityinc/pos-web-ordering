@@ -284,7 +284,6 @@ export default function HomePage({ forcedMode }: HomePageClientProps = {}) {
   const orderListPollingStopRef = useRef<boolean>(false);
   const [activeTab, setActiveTab] = useState<"menu" | "orderList">("menu");
   const [orderList, setOrderList] = useState<OrderRecord[]>([]);
-  const [paxCountInput, setPaxCountInput] = useState<number | "">("");
   const [isPaymentMethodModalOpen, setIsPaymentMethodModalOpen] = useState(false);
   const [isAwaitingPaymentConfirmation, setIsAwaitingPaymentConfirmation] = useState(false);
   const [orderListPollingToken, setOrderListPollingToken] = useState(0);
