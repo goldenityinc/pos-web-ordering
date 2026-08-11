@@ -4,7 +4,7 @@ export const APP_STORAGE_PREFIX = "goldenity:web-ordering:";
 export const WEB_ORDER_CART_STORAGE_KEY = "web_order_cart";
 export const CART_STORAGE_PREFIX = `${APP_STORAGE_PREFIX}cart:`;
 
-type CartStorageKeyParams = {
+export type CartStorageKeyParams = {
   tenantId: string;
   branchId?: string;
   tableId?: string;
