@@ -10,6 +10,8 @@ import { resolveOrderItemProductId } from "./order-utils.js";
 const NETWORK_WIFI_ERROR_MESSAGE =
   "Koneksi terhalang, mohon gunakan paket data atau cek koneksi internet Anda.";
 
+const _pendingAckPolls = new Map<string, AbortController>();
+
 export const DEFAULT_RECEIPT_FOOTER =
   "Barang yang sudah dibeli tidak dapat ditukar/dikembalikan";
 
@@ -816,86 +818,161 @@ export async function pollOrderAckStatus({
   maxSeconds?: number;
   onTick?: (remainingSec: number) => void;
 }): Promise<{ ackStatus: string; ackMessage?: string; error?: string }> {
-  const pollIntervalMs = 2000;
-  const startTime = Date.now();
-  const maxMs = maxSeconds * 1000;
+  // 🔴 STRICT MUTEX PER submissionId/orderId + AbortController:
+  //    Jika pollOrderAckStatus dipanggil BERULANG KALI untuk submission YANG SAMA
+  //    (karena double submit bug / re-render spam), maka poll LAMA di-abort
+  //    dan hanya poll BARU yang berjalan. Ini menghilangkan SPAM bertubi ack-status
+  //    seperti di screenshot pertama (20+ request paralel same id).
+  const pollMutexKey = submissionId
+    ? `sub:${String(submissionId).trim()}`
+    : orderId !== undefined && orderId !== null && String(orderId).trim() !== ""
+    ? `ord:${String(orderId).trim()}`
+    : `anon:${Date.now()}`;
+  const prevCtrl = _pendingAckPolls.get(pollMutexKey);
+  if (prevCtrl) {
+    try { prevCtrl.abort(new Error("duplicate-poll-cancelled")); } catch (_) {}
+    _pendingAckPolls.delete(pollMutexKey);
+  }
+  const abortCtrl = new AbortController();
+  _pendingAckPolls.set(pollMutexKey, abortCtrl);
+  let pollSucceededCleanly = false;
+  const cleanup = () => {
+    const stored = _pendingAckPolls.get(pollMutexKey);
+    if (stored === abortCtrl) _pendingAckPolls.delete(pollMutexKey);
+  };
+  try {
+    const pollIntervalMs = 2000;
+    const startTime = Date.now();
+    const maxMs = maxSeconds * 1000;
+    let flyingRequest: Promise<any> | null = null;
 
-  while (Date.now() - startTime < maxMs) {
-    const elapsed = Date.now() - startTime;
-    const remaining = Math.max(0, Math.ceil((maxMs - elapsed) / 1000));
-    if (onTick) {
-      try {
-        onTick(remaining);
-      } catch (_) {}
-    }
-
-    try {
-      const pathSegment = orderId
-        ? encodeURIComponent(String(orderId))
-        : submissionId
-        ? `by-submission/${encodeURIComponent(submissionId)}`
-        : null;
-
-      if (!pathSegment) {
+    while (Date.now() - startTime < maxMs) {
+      if (abortCtrl.signal.aborted) {
         return {
-          ackStatus: "FAILED_DELIVERY",
-          error: "orderId atau submissionId diperlukan untuk polling.",
+          ackStatus: "CANCELLED",
+          error: "Polling dibatalkan (duplicate / navigasi).",
         };
       }
-
-      // 🔴 FIX 401 Unauthorized polling ACK status:
-      //    Bridge /api/v1/orders/* route PROTECTED (butuh Bearer tenant token).
-      //    Web Ordering TIDAK punya token → wajib pakai BYPASS prefix /relay/
-      //    DAN kirim header "X-Internal-Relay: 1" untuk tenantResolver Bridge
-      //    melakukan bypass Bearer auth dan resolve tenant dari query/body.
-      const url = new URL(
-        `/api/v1/relay/orders/${pathSegment}/ack-status`,
-        BRIDGE_API_URL,
-      );
-      url.searchParams.set("tenantId", tenantId);
-      if (branchId?.trim()) {
-        url.searchParams.set("branchId", branchId.trim());
+      const elapsed = Date.now() - startTime;
+      const remaining = Math.max(0, Math.ceil((maxMs - elapsed) / 1000));
+      if (onTick) {
+        try { onTick(remaining); } catch (_) {}
       }
 
-      const resp = await fetch(url.toString(), {
-        method: "GET",
-        headers: {
-          "Content-Type": "application/json",
-          "X-Internal-Relay": "1",
-        },
-        cache: "no-store",
-      });
+      let statusDone = false;
+      if (flyingRequest === null) {
+        const pathSegment = orderId
+          ? encodeURIComponent(String(orderId))
+          : submissionId
+          ? `by-submission/${encodeURIComponent(submissionId)}`
+          : null;
 
-      if (resp.ok) {
-        try {
-          const data = (await resp.json()) as Record<string, unknown>;
-          const ackStatus =
-            toStringOrUndefined(data.ackStatus) ??
-            toStringOrUndefined(data.ack_status) ??
-            "";
-          const ackMessage =
-            toStringOrUndefined(data.ackMessage) ??
-            toStringOrUndefined(data.ack_message) ??
-            toStringOrUndefined(data.message);
+        if (!pathSegment) {
+          pollSucceededCleanly = true;
+          return {
+            ackStatus: "FAILED_DELIVERY",
+            error: "orderId atau submissionId diperlukan untuk polling.",
+          };
+        }
 
-          if (
-            ackStatus === "POS_PRINTED" ||
-            ackStatus === "POS_ACKNOWLEDGED" ||
-            ackStatus === "FAILED_DELIVERY"
-          ) {
-            return { ackStatus, ackMessage };
+        // 🔴 FIX 401 Unauthorized polling ACK status:
+        //    Bridge /api/v1/orders/* route PROTECTED (butuh Bearer tenant token).
+        //    Web Ordering TIDAK punya token → wajib pakai BYPASS prefix /relay/
+        //    DAN kirim header "X-Internal-Relay: 1" untuk tenantResolver Bridge
+        //    melakukan bypass Bearer auth dan resolve tenant dari query/body.
+        const url = new URL(
+          `/api/v1/relay/orders/${pathSegment}/ack-status`,
+          BRIDGE_API_URL,
+        );
+        url.searchParams.set("tenantId", tenantId);
+        if (branchId?.trim()) {
+          url.searchParams.set("branchId", branchId.trim());
+        }
+
+        const fetchPromise = (async () => {
+          try {
+            const resp = await fetch(url.toString(), {
+              method: "GET",
+              headers: {
+                "Content-Type": "application/json",
+                "X-Internal-Relay": "1",
+              },
+              cache: "no-store",
+              signal: abortCtrl.signal,
+            });
+            if (resp.ok) {
+              try {
+                const data = (await resp.json()) as Record<string, unknown>;
+                const ackStatus =
+                  toStringOrUndefined(data.ackStatus) ??
+                  toStringOrUndefined(data.ack_status) ??
+                  "";
+                const ackMessage =
+                  toStringOrUndefined(data.ackMessage) ??
+                  toStringOrUndefined(data.ack_message) ??
+                  toStringOrUndefined(data.message);
+                if (
+                  ackStatus === "POS_PRINTED" ||
+                  ackStatus === "POS_ACKNOWLEDGED" ||
+                  ackStatus === "FAILED_DELIVERY"
+                ) {
+                  statusDone = true;
+                  flyingRequest = null;
+                  pollSucceededCleanly = true;
+                  cleanup();
+                  return { ackStatus, ackMessage, done: true };
+                }
+              } catch (_parseErr) {}
+            }
+          } catch (_pollErr) {
+            if (_pollErr && (_pollErr as any).name === "AbortError") {
+              statusDone = true;
+              flyingRequest = null;
+              pollSucceededCleanly = true;
+              cleanup();
+              return { ackStatus: "CANCELLED", error: "Cancelled", done: true };
+            }
           }
-        } catch (_parseErr) {}
+          return { done: false };
+        })();
+        flyingRequest = fetchPromise;
+        fetchPromise.then((r) => {
+          if (flyingRequest === fetchPromise) flyingRequest = null;
+          return r;
+        }).catch(() => {
+          if (flyingRequest === fetchPromise) flyingRequest = null;
+        });
       }
-    } catch (_pollErr) {}
 
-    await new Promise((r) => setTimeout(r, pollIntervalMs));
+      const tickDeadline = Date.now() + pollIntervalMs;
+      // Wait BOTH: minimal 1 tick interval DAN (optional flying promise selesai sebelum deadline)
+      // TAPI NEVER start request BARU kalau sebelumnya BELUM selesai (mutex FLYING).
+      // Loop ini akan idle menunggu: sleep 150ms chunks check deadline or flying resolved.
+      while (Date.now() < tickDeadline) {
+        if (abortCtrl.signal.aborted) break;
+        if (statusDone) break;
+        const resolved = await Promise.race([
+          new Promise<"timeout">((r) => setTimeout(() => r("timeout"), 180)),
+          flyingRequest ? Promise.resolve(flyingRequest.then((x: any) => x as any)).catch(() => null) : Promise.resolve(null),
+        ]);
+        if (resolved && (resolved as any).done === true) {
+          return (resolved as any).ackStatus
+            ? { ackStatus: (resolved as any).ackStatus, ackMessage: (resolved as any).ackMessage, error: (resolved as any).error }
+            : { ackStatus: "CANCELLED", error: (resolved as any).error };
+        }
+      }
+      if (statusDone) break;
+    }
+
+    pollSucceededCleanly = true;
+    return {
+      ackStatus: "TIMEOUT",
+      error: `Polling ACK melebihi ${maxSeconds} detik.`,
+    };
+  } finally {
+    if (!pollSucceededCleanly) cleanup();
+    else cleanup();
   }
-
-  return {
-    ackStatus: "TIMEOUT",
-    error: `Polling ACK melebihi ${maxSeconds} detik.`,
-  };
 }
 
 export async function submitOrderWithPosQueueAck(

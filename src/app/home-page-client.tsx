@@ -263,6 +263,11 @@ export default function HomePage({ forcedMode }: HomePageClientProps = {}) {
   //             useEffect return cleanup SELALU clearInterval.
   const countdownEtaTimerRef = useRef<NodeJS.Timeout | number | null>(null);
   const orderListPollingTimerRef = useRef<NodeJS.Timeout | number | null>(null);
+  // 🔴 STRICT POLLING MUTEX: JAMIN HANYA 1 REQUEST ON-THE-FLY (never overlap).
+  //    Mencegah SPAM network: request sebelumnya BELUM selesai, next tick TIDAK BOLEH jalan.
+  //    Stop flag: useEffect teardown set TRUE → recursive setTimeout self terminate.
+  const orderListPollingFlyingRef = useRef<boolean>(false);
+  const orderListPollingStopRef = useRef<boolean>(false);
   const [activeTab, setActiveTab] = useState<"menu" | "orderList">("menu");
   const [orderList, setOrderList] = useState<OrderRecord[]>([]);
   const [paxCountInput, setPaxCountInput] = useState<number | "">("");
@@ -702,287 +707,340 @@ export default function HomePage({ forcedMode }: HomePageClientProps = {}) {
     const txId = safeGetStorage(ACTIVE_TX_ID_KEY);
     if (!txId) return;
 
-    const interval = setInterval(() => {
-      (async () => {
-        try {
-          // 🔴 FIX 401 Unauthorized order history poller by-transaction:
-          //    Protected Bridge route /api/v1/orders/... → ganti ke BYPASS
-          //    /api/v1/relay/orders/... + header X-Internal-Relay: 1 agar
-          //    tenantResolver bypass Bearer auth check.
-          const url = new URL(
-            `/api/v1/relay/orders/by-transaction/${encodeURIComponent(txId)}`,
-            process.env.NEXT_PUBLIC_BRIDGE_API_URL?.trim() ||
-              "https://goldenity-pos-api-bridge-production.up.railway.app",
-          );
-          url.searchParams.set("tenantId", tenantId);
-          if (branchId?.trim()) {
-            url.searchParams.set("branchId", branchId.trim());
-          }
-          // 🔴 FIX 2 CROSS-TABLE ISOLATION: PASS tableId KE ENDPOINT POLLING BY-TRANSACTION
-          //    Supaya Bridge + Admin Core WHERE filter table_id = MEJA INI SAJA.
-          //    Data order meja TIDAK BOcOR ke meja lain!
-          if (tableId?.trim()) {
-            url.searchParams.set("tableId", tableId.trim());
-          } else if (tableNumber?.trim() && /^\d+$/.test(tableNumber.trim())) {
-            // Fallback jika hanya ada tableNumber string numeric (mis. "3"):
-            url.searchParams.set("tableId", tableNumber.trim());
-          }
-          const resp = await fetch(url.toString(), {
-            method: "GET",
-            headers: {
-              "Content-Type": "application/json",
-              "X-Internal-Relay": "1",
-            },
-            cache: "no-store",
-          });
-          if (resp.ok) {
-            const data = await resp.json();
-            const orders =
-              data && Array.isArray(data)
-                ? data
-                : data && Array.isArray((data as any).data)
-                ? (data as any).data
-                : null;
-            if (orders) {
-              // 🔴 [FIX 3a] REMOVE stale cache entries: Bridge return hasil LOCAL dengan items LENGHT 0.
-              //    Hapus order dari storage yang items = [] tapi transactionId match (HINDARI
-              //    Order List Tab menampilkan data kosong → TIDAK BISA BAYAR karena totalAmount = 0).
-              const currentStored = loadOrdersForTransaction(txId) || [];
-              const purgeKeys = new Set<string>();
-              for (const upstream of orders) {
-                const subId = String(upstream.submissionId || "").trim() || "";
-                const hasItems = Array.isArray(upstream.items) && upstream.items.length > 0;
-                if (!subId) continue;
-                if (hasItems) purgeKeys.add(subId + "__KEEP_FRESH");
+    // 🔴 STRICT POLLING FIX: Replace naked setInterval (yang overlap / spam bertubi)
+    //    dengan RECURSIVE setTimeout + MUTEX FLYING flag (cuma 1 REQUEST on-the-fly).
+    //    Ini menghilangkan SPAM 20+ request / detik seperti di screenshot network tab pertama.
+    orderListPollingStopRef.current = false;
+    if (orderListPollingTimerRef.current !== null) {
+      clearTimeout(orderListPollingTimerRef.current as unknown as number);
+      orderListPollingTimerRef.current = null;
+    }
+
+    const POLL_INTERVAL_MS = 10000;
+    const MIN_BACKOFF_JITTER_MS = 250;
+    const MAX_BACKOFF_JITTER_MS = 950;
+    const randomJitter = () =>
+      Math.floor(Math.random() * (MAX_BACKOFF_JITTER_MS - MIN_BACKOFF_JITTER_MS + 1)) +
+      MIN_BACKOFF_JITTER_MS;
+
+    const scheduleNext = (delayMs?: number) => {
+      if (orderListPollingStopRef.current) return;
+      if (orderListPollingTimerRef.current !== null) {
+        clearTimeout(orderListPollingTimerRef.current as unknown as number);
+        orderListPollingTimerRef.current = null;
+      }
+      orderListPollingTimerRef.current = setTimeout(
+        tick,
+        (delayMs ?? POLL_INTERVAL_MS) + randomJitter(),
+      );
+    };
+
+    async function tick() {
+      if (orderListPollingStopRef.current) return;
+      if (orderListPollingFlyingRef.current === true) {
+        // Overlap guard: request sebelumnya BELUM selesai → lewati tick ini,
+        // schedule ulang cepat (jangan nunggu full interval).
+        scheduleNext(1800);
+        return;
+      }
+      orderListPollingFlyingRef.current = true;
+      try {
+        // 🔴 FIX 401 Unauthorized order history poller by-transaction:
+        //    Protected Bridge route /api/v1/orders/... → ganti ke BYPASS
+        //    /api/v1/relay/orders/... + header X-Internal-Relay: 1 agar
+        //    tenantResolver bypass Bearer auth check.
+        const url = new URL(
+          `/api/v1/relay/orders/by-transaction/${encodeURIComponent(txId)}`,
+          process.env.NEXT_PUBLIC_BRIDGE_API_URL?.trim() ||
+            "https://goldenity-pos-api-bridge-production.up.railway.app",
+        );
+        url.searchParams.set("tenantId", tenantId);
+        if (branchId?.trim()) {
+          url.searchParams.set("branchId", branchId.trim());
+        }
+        // 🔴 FIX 2 CROSS-TABLE ISOLATION: PASS tableId KE ENDPOINT POLLING BY-TRANSACTION
+        //    Supaya Bridge + Admin Core WHERE filter table_id = MEJA INI SAJA.
+        //    Data order meja TIDAK BOcOR ke meja lain!
+        if (tableId?.trim()) {
+          url.searchParams.set("tableId", tableId.trim());
+        } else if (tableNumber?.trim() && /^\d+$/.test(tableNumber.trim())) {
+          // Fallback jika hanya ada tableNumber string numeric (mis. "3"):
+          url.searchParams.set("tableId", tableNumber.trim());
+        }
+        const resp = await fetch(url.toString(), {
+          method: "GET",
+          headers: {
+            "Content-Type": "application/json",
+            "X-Internal-Relay": "1",
+          },
+          cache: "no-store",
+        });
+        if (resp.ok) {
+          const data = await resp.json();
+          const orders =
+            data && Array.isArray(data)
+              ? data
+              : data && Array.isArray((data as any).data)
+              ? (data as any).data
+              : null;
+          if (orders) {
+            // 🔴 [FIX 3a] REMOVE stale cache entries: Bridge return hasil LOCAL dengan items LENGHT 0.
+            //    Hapus order dari storage yang items = [] tapi transactionId match (HINDARI
+            //    Order List Tab menampilkan data kosong → TIDAK BISA BAYAR karena totalAmount = 0).
+            const currentStored = loadOrdersForTransaction(txId) || [];
+            const purgeKeys = new Set<string>();
+            for (const upstream of orders) {
+              const subId = String(upstream.submissionId || "").trim() || "";
+              const hasItems = Array.isArray(upstream.items) && upstream.items.length > 0;
+              if (!subId) continue;
+              if (hasItems) purgeKeys.add(subId + "__KEEP_FRESH");
+            }
+
+            // 🔴 CRITICAL FIX (ROOT CAUSE: Cart State Contamination QRIS PAID)
+            //    Sebelumnya: upstream filter "HANYA unpaid" → Order PAID LANGSUNG HILANG
+            //    (user bug 3: order QRIS bayar sukses langsung hilang dari list).
+            //
+            //    USER REQUST 30-MIN RETENTION: Order PAID TETAP MUNCUL 30 MENIT PERTAMA.
+            //    FILTER SEKARANG: HANYA BUANG order yang (PAID && LEBIH DARI 30 MENIT).
+            //    Yang tersisa: semua order unpaid + paid masih dalam 30 menit retention.
+            const nowMsForRetention = Date.now();
+            const keepableOrders = (orders as any[]).filter((o) =>
+              isOrderPaidStillWithinRetention(o, nowMsForRetention)
+            );
+            // Upstream ada PAID (sebagian / seluruhnya):
+            const upstreamHasAnyPaid = (orders as any[]).some((o) => isOrderRecordPaid(o));
+            // unpaidUpstream = dari keepableOrders yang unpaid (dipakai untuk safeToPurgeAll check):
+            const unpaidUpstream = keepableOrders.filter((o) => !isOrderRecordPaid(o));
+
+            // 🔴 🔴 CRITICAL HOTFIX (PAYMENT BANNER STATE LOCK "SUDAH LUNAS" PADAHAL ADA
+            //    ORDER TAMBAHAN BARU YANG UNPAID Rp 10.000):
+            //    Skenario bug user:
+            //      1) Order 1 (Americano Rp 10k) → QRIS PAID (ada di server upstream).
+            //      2) User tekan TAMBAH PESANAN → Order 2 (Teh Hijau Rp 10k) → Bayar di Kasir.
+            //      3) Submit order via POST checkout → order 2 MASIH di LOCAL STORAGE / orderList.
+            //      4) Polling 10 detik berjalan: upstream HANYA return Order 1 yang PAID
+            //         (karena Order 2 BELUM TERKIRIM / BELUM MASUK DB).
+            //      5) Hasil upstream: unpaidUpstream.length === 0 + upstreamHasAnyPaid = TRUE
+            //         → code L721 sebelumnya JALANKAN PURGE SEMUA (clearTransactionContext,
+            //           clearCart, setOrderList([])) → ORDER 2 BARU USER DITAMBAHKAN TERHAPUS!
+            //      6) orderList = [] → sortedOrderList = [] → orderPaymentFlags.allPaid === TRUE
+            //         → Banner hijau "SUDAH LUNAS" padahal user BERHUTANG Rp 10.000!
+            //    FIX:
+            //    SEBELUM jalankan purge → CHECK local currentStored (order yg sudah ada di
+            //    localStorage / state) APAKAH ADA YANG BELUM LUNAS / items>0 (artinya order
+            //    tambahan baru user yang masih pending offline). JIKA ADA → BATALKAN PURGE.
+            //    Purge HANYA boleh dijalankan JIKA:
+            //      (upstream semua paid) AND (local juga tidak ada unpaid apapun AND cart kosong).
+            const localHasAnyUnpaidItems = currentStored.some((s) => {
+              if (Array.isArray(s.items) && s.items.length > 0) {
+                // Ada items → cek apakah ini unpaid:
+                return !isOrderRecordPaid({
+                  paymentMethod: s.paymentMethod,
+                  paymentStatus: (s as any).paymentStatus,
+                  ackStatus: s.ackStatus,
+                });
               }
+              return false;
+            });
+            const localCartNotEmpty = Array.isArray(cart) && cart.length > 0 && cart.some((c) => Number(c.quantity || 0) > 0);
+            // 🔴 FIX BUG 1 (QRIS MODAL TERTUTUP):
+            //    Tambah 2 syarat SAFETY:
+            //      (A) !isCheckoutOpen — user BUKA modal pilih metode bayar (QRIS/Kasir)
+            //          → PURGE DITUNDA sampai user selesai checkout / tutup modal.
+            //      (B) !isQrisFlowOpen — user BUKA QRIS flow (Step1/Step2) → PURGE ditunda.
+            //    Ini TIDAK AKAN menjalankan setIsCheckoutOpen(false) / setIsQrisFlowOpen(false)
+            //    dari purge body → user TIDAK akan lihat "module langsung tertutup" setelah
+            //    klik "Bayar QRIS" (sblmnya purge karena upstream ada order PAID).
+            const checkoutsModalOpen = Boolean(isCheckoutOpen || isQrisFlowOpen);
+            const safeToPurgeAll =
+              unpaidUpstream.length === 0 &&
+              orders.length > 0 &&
+              upstreamHasAnyPaid &&
+              !localHasAnyUnpaidItems &&
+              !localCartNotEmpty &&
+              !checkoutsModalOpen;
 
-              // 🔴 CRITICAL FIX (ROOT CAUSE: Cart State Contamination QRIS PAID)
-              //    Sebelumnya: upstream filter "HANYA unpaid" → Order PAID LANGSUNG HILANG
-              //    (user bug 3: order QRIS bayar sukses langsung hilang dari list).
-              //
-              //    USER REQUST 30-MIN RETENTION: Order PAID TETAP MUNCUL 30 MENIT PERTAMA.
-              //    FILTER SEKARANG: HANYA BUANG order yang (PAID && LEBIH DARI 30 MENIT).
-              //    Yang tersisa: semua order unpaid + paid masih dalam 30 menit retention.
-              const nowMsForRetention = Date.now();
-              const keepableOrders = (orders as any[]).filter((o) =>
-                isOrderPaidStillWithinRetention(o, nowMsForRetention)
-              );
-              // Upstream ada PAID (sebagian / seluruhnya):
-              const upstreamHasAnyPaid = (orders as any[]).some((o) => isOrderRecordPaid(o));
-              // unpaidUpstream = dari keepableOrders yang unpaid (dipakai untuk safeToPurgeAll check):
-              const unpaidUpstream = keepableOrders.filter((o) => !isOrderRecordPaid(o));
+            let shouldPurgeStorageTotal = safeToPurgeAll;
 
-              // 🔴 🔴 CRITICAL HOTFIX (PAYMENT BANNER STATE LOCK "SUDAH LUNAS" PADAHAL ADA
-              //    ORDER TAMBAHAN BARU YANG UNPAID Rp 10.000):
-              //    Skenario bug user:
-              //      1) Order 1 (Americano Rp 10k) → QRIS PAID (ada di server upstream).
-              //      2) User tekan TAMBAH PESANAN → Order 2 (Teh Hijau Rp 10k) → Bayar di Kasir.
-              //      3) Submit order via POST checkout → order 2 MASIH di LOCAL STORAGE / orderList.
-              //      4) Polling 10 detik berjalan: upstream HANYA return Order 1 yang PAID
-              //         (karena Order 2 BELUM TERKIRIM / BELUM MASUK DB).
-              //      5) Hasil upstream: unpaidUpstream.length === 0 + upstreamHasAnyPaid = TRUE
-              //         → code L721 sebelumnya JALANKAN PURGE SEMUA (clearTransactionContext,
-              //           clearCart, setOrderList([])) → ORDER 2 BARU USER DITAMBAHKAN TERHAPUS!
-              //      6) orderList = [] → sortedOrderList = [] → orderPaymentFlags.allPaid === TRUE
-              //         → Banner hijau "SUDAH LUNAS" padahal user BERHUTANG Rp 10.000!
-              //    FIX:
-              //    SEBELUM jalankan purge → CHECK local currentStored (order yg sudah ada di
-              //    localStorage / state) APAKAH ADA YANG BELUM LUNAS / items>0 (artinya order
-              //    tambahan baru user yang masih pending offline). JIKA ADA → BATALKAN PURGE.
-              //    Purge HANYA boleh dijalankan JIKA:
-              //      (upstream semua paid) AND (local juga tidak ada unpaid apapun AND cart kosong).
-              const localHasAnyUnpaidItems = currentStored.some((s) => {
-                if (Array.isArray(s.items) && s.items.length > 0) {
-                  // Ada items → cek apakah ini unpaid:
-                  return !isOrderRecordPaid({
-                    paymentMethod: s.paymentMethod,
-                    paymentStatus: (s as any).paymentStatus,
-                    ackStatus: s.ackStatus,
-                  });
-                }
-                return false;
-              });
-              const localCartNotEmpty = Array.isArray(cart) && cart.length > 0 && cart.some((c) => Number(c.quantity || 0) > 0);
-              // 🔴 FIX BUG 1 (QRIS MODAL TERTUTUP):
-              //    Tambah 2 syarat SAFETY:
-              //      (A) !isCheckoutOpen — user BUKA modal pilih metode bayar (QRIS/Kasir)
-              //          → PURGE DITUNDA sampai user selesai checkout / tutup modal.
-              //      (B) !isQrisFlowOpen — user BUKA QRIS flow (Step1/Step2) → PURGE ditunda.
-              //    Ini TIDAK AKAN menjalankan setIsCheckoutOpen(false) / setIsQrisFlowOpen(false)
-              //    dari purge body → user TIDAK akan lihat "module langsung tertutup" setelah
-              //    klik "Bayar QRIS" (sblmnya purge karena upstream ada order PAID).
-              const checkoutsModalOpen = Boolean(isCheckoutOpen || isQrisFlowOpen);
-              const safeToPurgeAll =
-                unpaidUpstream.length === 0 &&
-                orders.length > 0 &&
-                upstreamHasAnyPaid &&
-                !localHasAnyUnpaidItems &&
-                !localCartNotEmpty &&
-                !checkoutsModalOpen;
+            // Step 2: Normalize fresh (keepableOrders = unpaid + paid retention 30min):
+            const normalized: OrderRecord[] = keepableOrders.map((o) => ({
+              submissionId:
+                String(o.submissionId || "").trim() || generateSubmissionId(),
+              orderId: o.orderId ?? o.id ?? undefined,
+              orderIndex: Number(o.orderIndex) || 1,
+              transactionId: o.transactionId || txId,
+              items:
+                (Array.isArray(o.items) ? o.items : []).map((it: any) => ({
+                  productId: String(it.productId || it.product_id || ""),
+                  name: String(it.name || ""),
+                  quantity: Number(it.quantity) || Number(it.qty) || 0,
+                  price: Number(it.price) || Number(it.harga_jual) || Number(it.unit_price) || 0,
+                  subtotal:
+                    Number(it.subtotal) ||
+                    (Number(it.price) || 0) * (Number(it.quantity) || Number(it.qty) || 0) ||
+                    0,
+                  note: it.note || it.special_note || undefined,
+                  modifiers: Array.isArray(it.modifiers) ? it.modifiers : [],
+                  variantNotes: Array.isArray(it.variantNotes)
+                    ? it.variantNotes
+                    : [],
+                })),
+              subtotal:
+                Number(o.subtotal) ||
+                Number(o.grandTotal) ||
+                Number(o.totalAmount) ||
+                Number(o.total_amount) ||
+                0,
+              customerName: o.customerName || o.customer_name || o.customer || undefined,
+              tableNumber: o.tableNumber || o.table_number || o.table || tableNumber,
+              tableId: o.tableId || o.table_id || undefined,
+              branchId: o.branchId || o.branch_id || undefined,
+              tenantId: o.tenantId || o.tenant_id || tenantId,
+              paymentMethod:
+                o.paymentMethod === "QRIS"
+                  ? "QRIS"
+                  : (o.paymentMethod && String(o.paymentMethod).toUpperCase() === "QRIS")
+                  ? "QRIS"
+                  : o.paymentMethod
+                  ? "CASHIER"
+                  : undefined,
+              createdAt:
+                o.createdAt ||
+                o.created_at ||
+                new Date().toISOString(),
+              receiptNumber:
+                o.receiptNumber || o.receipt_number || undefined,
+              ackStatus:
+                o.ackStatus || o.ack_status || "POS_ACKNOWLEDGED",
+              resolvedDeviceUuid: o.resolvedDeviceUuid || undefined,
+              orderNote: o.orderNote || o.notes || o.special_note || undefined,
+            }));
+            // Step 3: Fresh data punya order BERISI items → override storage
+            const freshHasAnyItems = normalized.some((n) => n.items && n.items.length > 0);
 
-              let shouldPurgeStorageTotal = safeToPurgeAll;
-
-              // Step 2: Normalize fresh (keepableOrders = unpaid + paid retention 30min):
-              const normalized: OrderRecord[] = keepableOrders.map((o) => ({
-                submissionId:
-                  String(o.submissionId || "").trim() || generateSubmissionId(),
-                orderId: o.orderId ?? o.id ?? undefined,
-                orderIndex: Number(o.orderIndex) || 1,
-                transactionId: o.transactionId || txId,
-                items:
-                  (Array.isArray(o.items) ? o.items : []).map((it: any) => ({
-                    productId: String(it.productId || it.product_id || ""),
-                    name: String(it.name || ""),
-                    quantity: Number(it.quantity) || Number(it.qty) || 0,
-                    price: Number(it.price) || Number(it.harga_jual) || Number(it.unit_price) || 0,
-                    subtotal:
-                      Number(it.subtotal) ||
-                      (Number(it.price) || 0) * (Number(it.quantity) || Number(it.qty) || 0) ||
-                      0,
-                    note: it.note || it.special_note || undefined,
-                    modifiers: Array.isArray(it.modifiers) ? it.modifiers : [],
-                    variantNotes: Array.isArray(it.variantNotes)
-                      ? it.variantNotes
-                      : [],
-                  })),
-                subtotal:
-                  Number(o.subtotal) ||
-                  Number(o.grandTotal) ||
-                  Number(o.totalAmount) ||
-                  Number(o.total_amount) ||
-                  0,
-                customerName: o.customerName || o.customer_name || o.customer || undefined,
-                tableNumber: o.tableNumber || o.table_number || o.table || tableNumber,
-                tableId: o.tableId || o.table_id || undefined,
-                branchId: o.branchId || o.branch_id || undefined,
-                tenantId: o.tenantId || o.tenant_id || tenantId,
-                paymentMethod:
-                  o.paymentMethod === "QRIS"
-                    ? "QRIS"
-                    : (o.paymentMethod && String(o.paymentMethod).toUpperCase() === "QRIS")
-                    ? "QRIS"
-                    : o.paymentMethod
-                    ? "CASHIER"
-                    : undefined,
-                createdAt:
-                  o.createdAt ||
-                  o.created_at ||
-                  new Date().toISOString(),
-                receiptNumber:
-                  o.receiptNumber || o.receipt_number || undefined,
-                ackStatus:
-                  o.ackStatus || o.ack_status || "POS_ACKNOWLEDGED",
-                resolvedDeviceUuid: o.resolvedDeviceUuid || undefined,
-                orderNote: o.orderNote || o.notes || o.special_note || undefined,
-              }));
-              // Step 3: Fresh data punya order BERISI items → override storage
-              const freshHasAnyItems = normalized.some((n) => n.items && n.items.length > 0);
-
-              // 🔴 CRITICAL FIX: JIKA upstream SEMUA order PAID (unpaidUpstream = 0 tapi
-              //    upstreamHasAnyPaid = TRUE) + LOCAL TIDAK ADA UNPAID ORDER BARU (cart juga
-              //    kosong) → ARTINYA SESSION INI SUDAH LUNAS SEMUA.
-              //    Segera jalankan "Sapu Bersih" (clearCart + clearTransactionContext
-              //    + reset orderList + close modals).
-              //    Ini mencegah bug user: "Setelah QRIS PAID, user mau tambah pesanan →
-              //    ITEM BARANG LAMA YANG SUDAH DIBAYAR muncul kembali di cart/order."
-              //
-              // 🔴 HOTFIX PAYMENT BANNER: Ganti conditional → safeToPurgeAll (sudah
-              //    include localHasAnyUnpaidItems + localCartNotEmpty check → JIKA ADA
-              //    order tambahan baru user yang masih offline pending → TIDAK DI PURGE).
-              if (isMounted && safeToPurgeAll) {
+            // 🔴 CRITICAL FIX: JIKA upstream SEMUA order PAID (unpaidUpstream = 0 tapi
+            //    upstreamHasAnyPaid = TRUE) + LOCAL TIDAK ADA UNPAID ORDER BARU (cart juga
+            //    kosong) → ARTINYA SESSION INI SUDAH LUNAS SEMUA.
+            //    Segera jalankan "Sapu Bersih" (clearCart + clearTransactionContext
+            //    + reset orderList + close modals).
+            //    Ini mencegah bug user: "Setelah QRIS PAID, user mau tambah pesanan →
+            //    ITEM BARANG LAMA YANG SUDAH DIBAYAR muncul kembali di cart/order."
+            //
+            // 🔴 HOTFIX PAYMENT BANNER: Ganti conditional → safeToPurgeAll (sudah
+            //    include localHasAnyUnpaidItems + localCartNotEmpty check → JIKA ADA
+            //    order tambahan baru user yang masih offline pending → TIDAK DI PURGE).
+            if (isMounted && safeToPurgeAll) {
+              try {
+                clearTransactionContext();
+              } catch (_) {}
+              try {
+                clearCart();
+              } catch (_) {}
+              setOrderList([]);
+              setIsAwaitingPaymentConfirmation(false);
+              // 🔴 FIX BUG 1 DOUBLE GUARD: safeToPurgeAll SUDAH check !isCheckoutOpen
+              //    dan !isQrisFlowOpen (line safeToPurgeAll). tapi TETAP JANGAN CLOSE
+              //    disini (redundan) → biarkan user yang klik Tutup / Selesaikan
+              //    (tidak setIsCheckoutOpen(false) / setIsQrisFlowOpen(false)).
+              setActiveTab("menu");
+              setCustomerNameInput("");
+              setPaymentMethod("CASHIER");
+              setPendingOrderId("");
+              setOrderReceipt(null);
+              setIsOrderSuccess(false);
+              safeRemoveStorage(buildOrdersStorageKey(txId));
+              safeRemoveStorage(ACTIVE_TX_ID_KEY);
+              safeRemoveStorage(AWAITING_PAYMENT_KEY);
+              safeRemoveStorage(`${APP_STORAGE_PREFIX}paxCount_${txId}`);
+              safeRemoveStorage(`${APP_STORAGE_PREFIX}customerName_${txId}`);
+              if (typeof safeGetStorage === "function") {
                 try {
-                  clearTransactionContext();
-                } catch (_) {}
-                try {
-                  clearCart();
-                } catch (_) {}
-                setOrderList([]);
-                setIsAwaitingPaymentConfirmation(false);
-                // 🔴 FIX BUG 1 DOUBLE GUARD: safeToPurgeAll SUDAH check !isCheckoutOpen
-                //    dan !isQrisFlowOpen (line safeToPurgeAll). tapi TETAP JANGAN CLOSE
-                //    disini (redundan) → biarkan user yang klik Tutup / Selesaikan
-                //    (tidak setIsCheckoutOpen(false) / setIsQrisFlowOpen(false)).
-                setActiveTab("menu");
-                setCustomerNameInput("");
-                setPaymentMethod("CASHIER");
-                setPendingOrderId("");
-                setOrderReceipt(null);
-                setIsOrderSuccess(false);
-                safeRemoveStorage(buildOrdersStorageKey(txId));
-                safeRemoveStorage(ACTIVE_TX_ID_KEY);
-                safeRemoveStorage(AWAITING_PAYMENT_KEY);
-                safeRemoveStorage(`${APP_STORAGE_PREFIX}paxCount_${txId}`);
-                safeRemoveStorage(`${APP_STORAGE_PREFIX}customerName_${txId}`);
-                if (typeof safeGetStorage === "function") {
-                  try {
-                    const allKeys = Object.keys(localStorage || {});
-                    for (const k of allKeys) {
-                      if (k.startsWith(APP_STORAGE_PREFIX)) {
-                        try { localStorage.removeItem(k); } catch (_e) {}
-                      }
+                  const allKeys = Object.keys(localStorage || {});
+                  for (const k of allKeys) {
+                    if (k.startsWith(APP_STORAGE_PREFIX)) {
+                      try { localStorage.removeItem(k); } catch (_e) {}
                     }
-                  } catch (_e) { /* ignore */ }
-                }
-                return;
+                  }
+                } catch (_e) { /* ignore */ }
               }
+              // Exit polling session already fully purged:
+              orderListPollingStopRef.current = true;
+              return;
+            }
 
-              if (freshHasAnyItems) {
-                writeLocalStorageJson(buildOrdersStorageKey(txId), normalized);
-                setOrderList(normalized);
-                if (normalized.length > 0) {
-                  setIsAwaitingPaymentConfirmation(true);
-                  if (isMounted) safeSetStorage(AWAITING_PAYMENT_KEY, "1");
-                } else {
-                  setIsAwaitingPaymentConfirmation(false);
-                  if (isMounted) safeSetStorage(AWAITING_PAYMENT_KEY, "0");
-                }
-              } else if (currentStored.length === 0 || shouldPurgeStorageTotal) {
-                // Step 4: Semua data kosong → purge empty stale
-                writeLocalStorageJson(buildOrdersStorageKey(txId), []);
-                setOrderList([]);
+            if (freshHasAnyItems) {
+              writeLocalStorageJson(buildOrdersStorageKey(txId), normalized);
+              setOrderList(normalized);
+              if (normalized.length > 0) {
+                setIsAwaitingPaymentConfirmation(true);
+                if (isMounted) safeSetStorage(AWAITING_PAYMENT_KEY, "1");
+              } else {
                 setIsAwaitingPaymentConfirmation(false);
                 if (isMounted) safeSetStorage(AWAITING_PAYMENT_KEY, "0");
-              } else {
-                // Step 5: Gabung (merge) existing STORED yg sudah ada items dengan upstream
-                //          (upstream acak waktu empty karena Bridge cache baru di-setting)
-                // 🔴 EXTRA SAFETY 30-MIN RETENTION: Saat merge, BUANG HANYA order yang
-                //    PAID + LEBIH DARI 30 MENIT. JANGAN BUANG paid yang masih retention
-                //    (user bug 3: order lunas harus tetap muncul 30 menit).
-                const stalePaidToRemove = new Set(
-                  currentStored
-                    .filter((s) => isOrderStaleAndPaidShouldPurge(s, nowMsForRetention))
-                    .map((s) => String(s.submissionId || "").trim() + "|" + String(s.orderIndex || "")),
-                );
-                let cleanCurrent = currentStored;
-                if (stalePaidToRemove.size > 0) {
-                  cleanCurrent = currentStored.filter((s) => {
-                    const key = String(s.submissionId || "").trim() + "|" + String(s.orderIndex || "");
-                    return !stalePaidToRemove.has(key);
-                  });
+              }
+            } else if (currentStored.length === 0 || shouldPurgeStorageTotal) {
+              // Step 4: Semua data kosong → purge empty stale
+              writeLocalStorageJson(buildOrdersStorageKey(txId), []);
+              setOrderList([]);
+              setIsAwaitingPaymentConfirmation(false);
+              if (isMounted) safeSetStorage(AWAITING_PAYMENT_KEY, "0");
+            } else {
+              // Step 5: Gabung (merge) existing STORED yg sudah ada items dengan upstream
+              //          (upstream acak waktu empty karena Bridge cache baru di-setting)
+              // 🔴 EXTRA SAFETY 30-MIN RETENTION: Saat merge, BUANG HANYA order yang
+              //    PAID + LEBIH DARI 30 MENIT. JANGAN BUANG paid yang masih retention
+              //    (user bug 3: order lunas harus tetap muncul 30 menit).
+              const stalePaidToRemove = new Set(
+                currentStored
+                  .filter((s) => isOrderStaleAndPaidShouldPurge(s, nowMsForRetention))
+                  .map((s) => String(s.submissionId || "").trim() + "|" + String(s.orderIndex || "")),
+              );
+              let cleanCurrent = currentStored;
+              if (stalePaidToRemove.size > 0) {
+                cleanCurrent = currentStored.filter((s) => {
+                  const key = String(s.submissionId || "").trim() + "|" + String(s.orderIndex || "");
+                  return !stalePaidToRemove.has(key);
+                });
+              }
+              const merged = [...cleanCurrent];
+              for (const n of normalized) {
+                const idx = merged.findIndex((m) => m.submissionId === n.submissionId);
+                if (idx >= 0) {
+                  merged[idx] = { ...merged[idx], ...n, items: (n.items && n.items.length > 0 ? n.items : merged[idx].items) };
+                } else {
+                  merged.push(n);
                 }
-                const merged = [...cleanCurrent];
-                for (const n of normalized) {
-                  const idx = merged.findIndex((m) => m.submissionId === n.submissionId);
-                  if (idx >= 0) {
-                    merged[idx] = { ...merged[idx], ...n, items: (n.items && n.items.length > 0 ? n.items : merged[idx].items) };
-                  } else {
-                    merged.push(n);
-                  }
-                }
-                writeLocalStorageJson(buildOrdersStorageKey(txId), merged);
-                setOrderList([...merged]);
-                if (merged.length === 0) {
-                  setIsAwaitingPaymentConfirmation(false);
-                  if (isMounted) safeSetStorage(AWAITING_PAYMENT_KEY, "0");
-                }
+              }
+              writeLocalStorageJson(buildOrdersStorageKey(txId), merged);
+              setOrderList([...merged]);
+              if (merged.length === 0) {
+                setIsAwaitingPaymentConfirmation(false);
+                if (isMounted) safeSetStorage(AWAITING_PAYMENT_KEY, "0");
               }
             }
           }
-        } catch (_e) {}
-      })();
-    }, 10000);
+        }
+      } catch (_e) {
+        // ignore polling errors (network glitch sementara)
+      } finally {
+        orderListPollingFlyingRef.current = false;
+      }
+      // Schedule tick BERIKUTNYA hanya setelah request SELESAI (strictly serialized):
+      scheduleNext(POLL_INTERVAL_MS);
+    }
 
-    return () => clearInterval(interval);
+    // Kick POLL immediately (inline first tick, tidak menunggu 10s).
+    void tick();
+
+    return () => {
+      // Strict cleanup: stop flag + kill pending timer (never leak timer antar mount).
+      orderListPollingStopRef.current = true;
+      if (orderListPollingTimerRef.current !== null) {
+        clearTimeout(orderListPollingTimerRef.current as unknown as number);
+        orderListPollingTimerRef.current = null;
+      }
+      orderListPollingFlyingRef.current = false;
+    };
   }, [isMounted, tenantId, branchId]);
 
   const activeTransactionId = isMounted ? safeGetStorage(ACTIVE_TX_ID_KEY) || "" : "";
