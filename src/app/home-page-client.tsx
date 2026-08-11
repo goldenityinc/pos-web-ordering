@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { useSearchParams } from "next/navigation";
 import {
   DEFAULT_RECEIPT_FOOTER,
@@ -255,6 +255,14 @@ export default function HomePage({ forcedMode }: HomePageClientProps = {}) {
     message: "",
     type: "info",
   });
+  // 🔴 FIX: GUARD setInterval leak (memory leak, ack-status spam, timer loncat)
+  //    Sebelumnya: setiap etaStartToken berubah create setInterval baru TANPA memastikan interval lama udah di-clear secara agresif.
+  //    Efek samping: puluhan interval berjalan bareng, decrement eta 20x per detik, spawn banyak ack-status preflight fetch.
+  //    SEKARANG: Semua timer disimpan di useRef (persist across render, TIDAK ikut rerender).
+  //             ALWAYS clearInterval(timerRef.current) BEFORE setInterval baru.
+  //             useEffect return cleanup SELALU clearInterval.
+  const countdownEtaTimerRef = useRef<NodeJS.Timeout | number | null>(null);
+  const orderListPollingTimerRef = useRef<NodeJS.Timeout | number | null>(null);
   const [activeTab, setActiveTab] = useState<"menu" | "orderList">("menu");
   const [orderList, setOrderList] = useState<OrderRecord[]>([]);
   const [paxCountInput, setPaxCountInput] = useState<number | "">("");
@@ -638,12 +646,29 @@ export default function HomePage({ forcedMode }: HomePageClientProps = {}) {
   //    Masalah lama: etaSeconds HANYA di-update via onTick callback dari polling API (dipanggil setiap 1-2s).
   //    Hasil: user lihat "Estimasi 10 detik" STUCK FROZEN di angka 10 selama berdetik-detik sebelum onTick dipanggil.
   //    Solusi: Timer visual terpisah setInterval 1 detik, decrement etaSeconds otomatis sampai 0.
+  // 🔴 FIX #2 (CRITICAL MEMORY LEAK):
+  //    Sebelumnya: setiap etaStartToken berubah → useEffect rerun → interval baru dibuat.
+  //    → BISA JADI ada delay / race condition, interval lama masih hidup 1-2s lebih lambat → 2+ interval running bareng.
+  //    SEKARANG: Gunakan countdownEtaTimerRef (persist across render).
+  //             SELALU clearInterval countdownEtaTimerRef.current BEFORE setInterval baru.
   useEffect(() => {
-    if (!queueScreen.isOpen) return;
+    if (!queueScreen.isOpen) {
+      // Close → force clear interval.
+      if (countdownEtaTimerRef.current !== null) {
+        clearInterval(countdownEtaTimerRef.current as unknown as number);
+        countdownEtaTimerRef.current = null;
+      }
+      return;
+    }
     if (queueScreen.etaSeconds === undefined || queueScreen.etaSeconds === null) return;
 
+    // ↓ AGGRESSIVE OVERLAP GUARD: sebelum buat interval BARU, pastikan YANG LAMA DIBUNUH DULU.
+    if (countdownEtaTimerRef.current !== null) {
+      clearInterval(countdownEtaTimerRef.current as unknown as number);
+      countdownEtaTimerRef.current = null;
+    }
     const intervalMs = 1000;
-    const timer = setInterval(() => {
+    countdownEtaTimerRef.current = setInterval(() => {
       setQueueScreen((prev) => {
         if (!prev.isOpen) return prev;
         if (prev.etaSeconds === undefined || prev.etaSeconds === null) return prev;
@@ -652,7 +677,12 @@ export default function HomePage({ forcedMode }: HomePageClientProps = {}) {
       });
     }, intervalMs);
 
-    return () => clearInterval(timer);
+    return () => {
+      if (countdownEtaTimerRef.current !== null) {
+        clearInterval(countdownEtaTimerRef.current as unknown as number);
+        countdownEtaTimerRef.current = null;
+      }
+    };
     // 🔴 Dependency: etaStartToken BERUBAH HANYA SAAT onProgress set NILAI ETA BARU (bukan per render).
   }, [queueScreen.isOpen, etaStartToken]);
 
