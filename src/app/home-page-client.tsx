@@ -1557,14 +1557,31 @@ export default function HomePage({ forcedMode }: HomePageClientProps = {}) {
   };
 
   const handlePaymentMethodSelected = (method: "QRIS" | "CASHIER") => {
-    setIsPaymentMethodModalOpen(false);
-    if (method === "QRIS") {
-      if (isMounted) safeSetStorage(AWAITING_PAYMENT_KEY, "0");
-      setIsQrisFlowOpen(true);
-    } else {
-      if (isMounted) safeSetStorage(AWAITING_PAYMENT_KEY, "1");
-      setIsAwaitingPaymentConfirmation(true);
-      showSnackbar("Silakan selesaikan pembayaran di kasir. Meja akan otomatis bersih setelah kasir mengonfirmasi.", "info");
+    try {
+      // 🔴 HOTFIX: 100% crash-safe setState order, always lock in paymentMethod FIRST
+      //   before setIsQrisFlowOpen(true). Downstream components assume paymentMethod
+      //   is defined when isQrisFlowOpen=true, otherwise they throw undefined.
+      setPaymentMethod(method);
+      setSubmitError(null);
+      setIsPaymentMethodModalOpen(false);
+      if (method === "QRIS") {
+        if (isMounted) safeSetStorage(AWAITING_PAYMENT_KEY, "0");
+        setIsQrisFlowOpen(true);
+      } else {
+        if (isMounted) safeSetStorage(AWAITING_PAYMENT_KEY, "1");
+        setIsAwaitingPaymentConfirmation(true);
+        setIsQrisFlowOpen(false);
+        try {
+          showSnackbar("Silakan selesaikan pembayaran di kasir. Meja akan otomatis bersih setelah kasir mengonfirmasi.", "info");
+        } catch (_) {}
+      }
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      try { setSubmitError(msg); } catch (_) {}
+      try { setIsPaymentMethodModalOpen(false); } catch (_) {}
+      try {
+        showSnackbar("Gagal memilih metode pembayaran: " + msg, "error");
+      } catch (_) {}
     }
   };
 
@@ -1954,7 +1971,12 @@ export default function HomePage({ forcedMode }: HomePageClientProps = {}) {
     selectedProofFile?: File | null,
   ) => {
     if (isSubmitting) return;
-    await handleSubmitOrderWithQueue(selectedPaymentMethod, selectedProofFile);
+    try {
+      setIsSubmitting(true);
+      await handleSubmitOrderWithQueue(selectedPaymentMethod, selectedProofFile);
+    } finally {
+      setIsSubmitting(false);
+    }
   };
 
   const handleProofFileChange = (file: File | null) => {
