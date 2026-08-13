@@ -1306,6 +1306,70 @@ export async function submitOrderWithPosQueueAck(
   _pendingSubmitOrders.set(submitMutexKey, finalWork);
   try {
     const finalResult = await finalWork;
+    const resultAny = finalResult as Record<string, unknown> | null | undefined;
+    try {
+      if (typeof window !== "undefined" && typeof localStorage !== "undefined") {
+        const STORAGE_KEY_TX = "goldenity:v1:activeTxId";
+        const STORAGE_KEY_ORDER = "goldenity:v1:activeOrderId";
+        const STORAGE_KEY_SUBMISSION = "goldenity:v1:activeSubmissionId";
+        const STORAGE_KEY_RECEIPT = "goldenity:v1:activeReceiptNumber";
+        const STORAGE_KEY_META = "goldenity:v1:activeOrderMeta";
+
+        const extractTxId =
+          (restInput as Record<string, unknown>).transactionId ??
+          (restInput as Record<string, unknown>).transaction_id ??
+          resultAny?.transactionId ??
+          resultAny?.transaction_id ??
+          resultAny?.receiptNumber ??
+          resultAny?.receipt_number ??
+          (restInput as Record<string, unknown>).receiptNumber ??
+          (restInput as Record<string, unknown>).receipt_number;
+        const extractOrderId =
+          resultAny?.orderId ??
+          resultAny?.order_id ??
+          resultAny?.id ??
+          (restInput as Record<string, unknown>).orderId ??
+          (restInput as Record<string, unknown>).order_id;
+        const extractSubmission =
+          resultAny?.submissionId ??
+          resultAny?.submission_id ??
+          (restInput as Record<string, unknown>).submissionId ??
+          (restInput as Record<string, unknown>).submission_id ??
+          submissionId;
+        const extractReceipt =
+          resultAny?.receiptNumber ??
+          resultAny?.receipt_number ??
+          (restInput as Record<string, unknown>).receiptNumber ??
+          (restInput as Record<string, unknown>).receipt_number;
+        if (extractTxId && typeof extractTxId === "string" && extractTxId.trim().length > 0) {
+          localStorage.setItem(STORAGE_KEY_TX, String(extractTxId).trim());
+        }
+        if (extractOrderId && typeof extractOrderId === "string" && String(extractOrderId).trim().length > 0) {
+          localStorage.setItem(STORAGE_KEY_ORDER, String(extractOrderId).trim());
+        }
+        if (extractSubmission && typeof extractSubmission === "string" && extractSubmission.trim().length > 0) {
+          localStorage.setItem(STORAGE_KEY_SUBMISSION, String(extractSubmission).trim());
+        }
+        if (extractReceipt && typeof extractReceipt === "string" && extractReceipt.trim().length > 0) {
+          localStorage.setItem(STORAGE_KEY_RECEIPT, String(extractReceipt).trim());
+        }
+        try {
+          const metaObj: Record<string, unknown> = {
+            savedAt: new Date().toISOString(),
+            tenantId: (restInput as Record<string, unknown>).tenantId,
+            branchId: (restInput as Record<string, unknown>).branchId,
+            tableId: (restInput as Record<string, unknown>).tableId,
+            success: (resultAny?.success === true),
+            ackStatus: resultAny?.ackStatus ?? null,
+          };
+          localStorage.setItem(STORAGE_KEY_META, JSON.stringify(metaObj));
+        } catch (_metaErr) {
+          // ignore JSON serialization issues for meta
+        }
+      }
+    } catch (_lsErr) {
+      // localStorage write must NEVER break the submit flow. SSR/hydration safety.
+    }
     return finalResult as any;
   } finally {
     const storedNow = _pendingSubmitOrders.get(submitMutexKey);
@@ -1553,4 +1617,132 @@ export async function replayStuckTransactionOrder({
       error: err instanceof Error ? err.message : "Terjadi kesalahan tak terduga.",
     };
   }
+}
+
+const ACTIVE_TX_STORAGE_KEY = "goldenity:v1:activeTxId";
+const ACTIVE_ORDER_STORAGE_KEY = "goldenity:v1:activeOrderId";
+const ACTIVE_SUBMISSION_STORAGE_KEY = "goldenity:v1:activeSubmissionId";
+const ACTIVE_RECEIPT_STORAGE_KEY = "goldenity:v1:activeReceiptNumber";
+const ACTIVE_ORDER_META_KEY = "goldenity:v1:activeOrderMeta";
+
+export type PersistedActiveOrderSnapshot = {
+  transactionId: string | null;
+  orderId: string | null;
+  submissionId: string | null;
+  receiptNumber: string | null;
+  meta: Record<string, unknown> | null;
+  found: boolean;
+};
+
+function readStorageValueSafely(key: string): string | null {
+  if (typeof window === "undefined" || typeof localStorage === "undefined") return null;
+  try {
+    const raw = localStorage.getItem(key);
+    if (raw == null) return null;
+    const s = String(raw).trim();
+    return s.length > 0 ? s : null;
+  } catch {
+    return null;
+  }
+}
+
+export function getPersistedActiveOrder(): PersistedActiveOrderSnapshot {
+  const txId = readStorageValueSafely(ACTIVE_TX_STORAGE_KEY);
+  const orderId = readStorageValueSafely(ACTIVE_ORDER_STORAGE_KEY);
+  const submissionId = readStorageValueSafely(ACTIVE_SUBMISSION_STORAGE_KEY);
+  const receiptNumber = readStorageValueSafely(ACTIVE_RECEIPT_STORAGE_KEY);
+  let meta: Record<string, unknown> | null = null;
+  try {
+    const rawMeta = readStorageValueSafely(ACTIVE_ORDER_META_KEY);
+    if (rawMeta) {
+      const parsed = JSON.parse(rawMeta);
+      if (parsed && typeof parsed === "object") meta = parsed as Record<string, unknown>;
+    }
+  } catch {
+    meta = null;
+  }
+  const found = Boolean(txId || orderId || submissionId || receiptNumber);
+  return {
+    transactionId: txId,
+    orderId,
+    submissionId,
+    receiptNumber,
+    meta,
+    found,
+  };
+}
+
+export function clearPersistedActiveOrder(): void {
+  if (typeof window === "undefined" || typeof localStorage === "undefined") return;
+  try {
+    localStorage.removeItem(ACTIVE_TX_STORAGE_KEY);
+  } catch {
+    /* noop */
+  }
+  try {
+    localStorage.removeItem(ACTIVE_ORDER_STORAGE_KEY);
+  } catch {
+    /* noop */
+  }
+  try {
+    localStorage.removeItem(ACTIVE_SUBMISSION_STORAGE_KEY);
+  } catch {
+    /* noop */
+  }
+  try {
+    localStorage.removeItem(ACTIVE_RECEIPT_STORAGE_KEY);
+  } catch {
+    /* noop */
+  }
+  try {
+    localStorage.removeItem(ACTIVE_ORDER_META_KEY);
+  } catch {
+    /* noop */
+  }
+}
+
+export function getActiveOrderByTransaction(
+  transactionId: string,
+  params: { tenantId?: string | null; branchId?: string | null; tableId?: string | null } = {},
+) {
+  const { tenantId, branchId, tableId } = params || {};
+  if (typeof transactionId !== "string" || transactionId.trim().length === 0) {
+    return Promise.resolve({ ok: false, data: [], error: "Transaction ID kosong." });
+  }
+  const q = new URLSearchParams();
+  if (typeof tenantId === "string" && tenantId.trim().length > 0) q.set("tenantId", tenantId.trim());
+  if (typeof branchId === "string" && branchId.trim().length > 0) q.set("branchId", branchId.trim());
+  if (typeof tableId === "string" && tableId.trim().length > 0) q.set("tableId", tableId.trim());
+  const qs = q.toString();
+  const url = `${BRIDGE_API_URL}/api/v1/relay/orders/by-transaction/${encodeURIComponent(transactionId.trim())}${qs ? `?${qs}` : ""}`;
+  return fetchJson(url, {
+    method: "GET",
+    headers: {
+      Accept: "application/json",
+      ...(typeof tenantId === "string" && tenantId.trim().length > 0 ? { "X-Tenant-Id": tenantId.trim() } : {}),
+      "X-Internal-Relay": "1",
+    },
+  })
+    .then(({ response, json }) => {
+      if (!response.ok) {
+        const errMsg =
+          (typeof json === "object" && json !== null && typeof (json as { message?: string }).message === "string"
+            ? (json as { message: string }).message
+            : null) || `Gagal mengambil status order (HTTP ${response.status}).`;
+        return { ok: false, data: [], error: errMsg };
+      }
+      let arr: unknown[] = [];
+      if (Array.isArray(json)) {
+        arr = json as unknown[];
+      } else if (typeof json === "object" && json !== null) {
+        const candidate = (json as { data?: unknown }).data;
+        if (Array.isArray(candidate)) arr = candidate as unknown[];
+      }
+      return { ok: true, data: arr as any[], error: null };
+    })
+    .catch((err) => ({
+      ok: false,
+      data: [],
+      error: err instanceof Error ? err.message : "Koneksi terputus saat mengambil status order.",
+    }));
 }

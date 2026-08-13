@@ -2500,6 +2500,44 @@ export default function HomePage({ forcedMode }: HomePageClientProps = {}) {
                     (sum, it) => sum + it.quantity,
                     0,
                   );
+
+                  const nowMs = Date.now();
+                  const createdAtMs = (() => {
+                    const raw = (order as unknown as { createdAt?: unknown; created_at?: unknown; createdAtTimestamp?: unknown })
+                      .createdAt ||
+                      (order as unknown as { createdAt?: unknown; created_at?: unknown; createdAtTimestamp?: unknown }).created_at ||
+                      (order as unknown as { createdAt?: unknown; created_at?: unknown; createdAtTimestamp?: unknown }).createdAtTimestamp;
+                    if (raw == null) return 0;
+                    if (typeof raw === "number") {
+                      if (!Number.isFinite(raw)) return 0;
+                      return raw > 1e12 ? raw : raw * 1000;
+                    }
+                    if (typeof raw !== "string") return 0;
+                    const n = Number(raw);
+                    if (Number.isFinite(n) && n > 1e9) return n > 1e12 ? n : n * 1000;
+                    const d = new Date(raw);
+                    const t = d.getTime();
+                    return Number.isFinite(t) ? t : 0;
+                  })();
+                  const orderStatusRaw = (
+                    (order as unknown as { orderStatus?: unknown; order_status?: unknown; ackStatus?: unknown }).orderStatus ||
+                    (order as unknown as { orderStatus?: unknown; order_status?: unknown; ackStatus?: unknown }).order_status ||
+                    (order as unknown as { orderStatus?: unknown; order_status?: unknown; ackStatus?: unknown }).ackStatus ||
+                    ""
+                  ).toString().toUpperCase().trim();
+                  const isPendingEtaFallback =
+                    createdAtMs > 0 &&
+                    nowMs - createdAtMs > 3 * 60 * 1000 &&
+                    (orderStatusRaw === "PENDING" ||
+                      orderStatusRaw === "PENDING_ACK" ||
+                      orderStatusRaw === "PENDING_PAYMENT" ||
+                      orderStatusRaw === "TIMEOUT" ||
+                      orderStatusRaw === "NEW" ||
+                      orderStatusRaw === "OPEN" ||
+                      orderStatusRaw === "PARTIAL" ||
+                      orderStatusRaw === "ACTIVE" ||
+                      !orderStatusRaw);
+
                   return (
                     <div
                       key={order.submissionId}
@@ -2537,6 +2575,11 @@ export default function HomePage({ forcedMode }: HomePageClientProps = {}) {
                               <p className="mt-0.5 text-[11px] text-slate-500 font-mono">
                                 Struk: {order.receiptNumber}
                               </p>
+                            ) : null}
+                            {isPendingEtaFallback ? (
+                              <div className="mt-2 rounded-xl border border-amber-200 bg-amber-50 px-3 py-1.5 text-[11px] leading-relaxed text-amber-800">
+                                ⏱️ <strong>Estimasi Waktu Tunggu: 15-20 Menit</strong> (Sedang Jam Sibuk)
+                              </div>
                             ) : null}
                           </div>
                         </div>
