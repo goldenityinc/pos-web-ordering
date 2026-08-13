@@ -1124,6 +1124,12 @@ export async function submitOrderWithPosQueueAck(
         }
       }
     } catch (fetchErr) {
+      try { _pendingSubmitOrders.delete(submitMutexKey); } catch (_noop) {}
+      try {
+        if (typeof window !== "undefined" && typeof console !== "undefined") {
+          try { console.log(`[dedup:fetchErr] Cleared dedup cache for retry (immediate fetch err) key=${submitMutexKey} err=${fetchErr instanceof Error ? fetchErr.message : fetchErr}`); } catch (_noop) {}
+        }
+      } catch (_noop2) {}
       return {
         success: false,
         submissionId,
@@ -1291,6 +1297,12 @@ export async function submitOrderWithPosQueueAck(
       };
     }
 
+    try { _pendingSubmitOrders.delete(submitMutexKey); } catch (_noop) {}
+    try {
+      if (typeof window !== "undefined" && typeof console !== "undefined") {
+        try { console.log(`[dedup:pollTimeout] Cleared dedup cache for retry (ack polling timeout 35s) key=${submitMutexKey} submissionId=${submissionId}`); } catch (_noop) {}
+      }
+    } catch (_noop2) {}
     return {
       success: false,
       submissionId: echoSubmissionId,
@@ -1305,6 +1317,12 @@ export async function submitOrderWithPosQueueAck(
       error: pollResult.error ?? "Perangkat kasir tidak merespon dalam 30 detik.",
     };
   } catch (err) {
+    try { _pendingSubmitOrders.delete(submitMutexKey); } catch (_noop) {}
+    try {
+      if (typeof window !== "undefined" && typeof console !== "undefined") {
+        try { console.log(`[dedup:catch] Cleared dedup cache for retry (exception thrown) key=${submitMutexKey} err=${err?.message || err}`); } catch (_noop) {}
+      }
+    } catch (_noop2) {}
     return {
       success: false,
       submissionId,
