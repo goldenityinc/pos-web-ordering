@@ -1303,9 +1303,15 @@ export async function submitOrderWithPosQueueAck(
   }
   })();
 
-  _pendingSubmitOrders.set(submitMutexKey, finalWork);
+  const dedupFinallyAttached: Promise<any> = finalWork.finally(() => {
+    try {
+      const currentStored = _pendingSubmitOrders.get(submitMutexKey);
+      if (Object.is(currentStored, finalWork) || Object.is(currentStored, dedupFinallyAttached)) _pendingSubmitOrders.delete(submitMutexKey);
+    } catch (_noop) { /* noop */ }
+  });
+  _pendingSubmitOrders.set(submitMutexKey, dedupFinallyAttached);
   try {
-    const finalResult = await finalWork;
+    const finalResult = await dedupFinallyAttached;
     const resultAny = finalResult as Record<string, unknown> | null | undefined;
     try {
       if (typeof window !== "undefined" && typeof localStorage !== "undefined") {
@@ -1372,8 +1378,12 @@ export async function submitOrderWithPosQueueAck(
     }
     return finalResult as any;
   } finally {
-    const storedNow = _pendingSubmitOrders.get(submitMutexKey);
-    if (storedNow === finalWork) _pendingSubmitOrders.delete(submitMutexKey);
+    try {
+      const storedNow = _pendingSubmitOrders.get(submitMutexKey);
+      if (Object.is(storedNow, finalWork) || Object.is(storedNow, dedupFinallyAttached)) {
+        _pendingSubmitOrders.delete(submitMutexKey);
+      }
+    } catch (_dedupCleanNoop) { /* noop */ }
   }
 }
 
