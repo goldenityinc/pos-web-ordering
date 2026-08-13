@@ -979,9 +979,10 @@ export async function pollOrderAckStatus({
 export async function submitOrderWithPosQueueAck(
   input: SubmitOrderInput & {
     onProgress?: (pct: number, stage: string, etaSeconds?: number) => void;
+    isRetry?: boolean;
   },
 ): Promise<SubmitOrderResponse & { ackStatus?: string; error?: string }> {
-  const { onProgress, ...restInput } = input;
+  const { onProgress, isRetry = false, ...restInput } = input;
 
   let submissionId = restInput.submissionId?.trim();
   if (!submissionId) {
@@ -1007,10 +1008,21 @@ export async function submitOrderWithPosQueueAck(
     String(restInput.transactionId || "").trim(),
     submissionId,
   ].join("|");
-  const prev = _pendingSubmitOrders.get(submitMutexKey);
-  if (prev) {
-    // Return promise SAMA dengan yang sudah berjalan (deduplicate 100%).
-    return prev as Promise<any>;
+
+  if (isRetry) {
+    // 🔴 CRITICAL HOTFIX 2B: Retry mode → BYPASS CACHE SEPENUHNYA, NUKE old dedup, FRESH network call!
+    try {
+      _pendingSubmitOrders.delete(submitMutexKey);
+      if (typeof window !== "undefined" && typeof console !== "undefined") {
+        try { console.log(`[dedup:retry] Cleared dedup cache for retry (isRetry=true) key=${submitMutexKey}`); } catch (_noop) {}
+      }
+    } catch (_noop) {}
+  } else {
+    const prev = _pendingSubmitOrders.get(submitMutexKey);
+    if (prev) {
+      // Return promise SAMA dengan yang sudah berjalan (deduplicate 100%).
+      return prev as Promise<any>;
+    }
   }
 
   const finalWork = (async () => {
@@ -1303,13 +1315,41 @@ export async function submitOrderWithPosQueueAck(
   }
   })();
 
-  const dedupFinallyAttached: Promise<any> = finalWork.finally(() => {
-    try {
-      const currentStored = _pendingSubmitOrders.get(submitMutexKey);
-      if (Object.is(currentStored, finalWork) || Object.is(currentStored, dedupFinallyAttached)) _pendingSubmitOrders.delete(submitMutexKey);
-    } catch (_noop) { /* noop */ }
-  });
-  _pendingSubmitOrders.set(submitMutexKey, dedupFinallyAttached);
+  const dedupFinallyAttached: Promise<any> = finalWork.then(
+    (res) => {
+      try {
+        const rAny = (res || {}) as Record<string, unknown>;
+        const success = Boolean(rAny.success);
+        const ackStatus = String(rAny.ackStatus || "").trim().toUpperCase();
+        if (success && (ackStatus === "POS_PRINTED" || ackStatus === "POS_ACKNOWLEDGED" || ackStatus === "SYNC_DELAYED" || ackStatus === "ACK")) {
+          // SUCCESS path: dedup already cleaned below; keep for idempotency window 10 detik then remove
+          setTimeout(() => { try { _pendingSubmitOrders.delete(submitMutexKey); } catch (_noop) {} }, 10_000);
+        } else {
+          // success=false / timeout / 5xx / ackStatus TIMEOUT → NUKE immediately supaya retry bisa langsung
+          try {
+            _pendingSubmitOrders.delete(submitMutexKey);
+            if (typeof window !== "undefined" && typeof console !== "undefined") {
+              try { console.log(`[dedup:finally] Cleared dedup cache for retry (success=${success} ackStatus=${ackStatus}) key=${submitMutexKey}`); } catch (_noop) {}
+            }
+          } catch (_noop) {}
+        }
+      } catch (_noop) {}
+      return res;
+    },
+    (err) => {
+      try {
+        _pendingSubmitOrders.delete(submitMutexKey);
+        if (typeof window !== "undefined" && typeof console !== "undefined") {
+          try { console.log(`[dedup:catch] Cleared dedup cache for retry (exception thrown) key=${submitMutexKey} err=${err?.message || err}`); } catch (_noop) {}
+        }
+      } catch (_noop) {}
+      // re-throw preserved for legacy upstream behaviour
+      throw err;
+    },
+  );
+  try {
+    _pendingSubmitOrders.set(submitMutexKey, dedupFinallyAttached);
+  } catch (_noop) {}
   try {
     const finalResult = await dedupFinallyAttached;
     const resultAny = finalResult as Record<string, unknown> | null | undefined;

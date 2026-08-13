@@ -1421,7 +1421,7 @@ export default function HomePage({ forcedMode }: HomePageClientProps = {}) {
       note: it.note,
     }));
 
-    const submitPayload: Parameters<typeof submitOrderWithPosQueueAck>[0] = {
+    const submitPayloadRaw: Parameters<typeof submitOrderWithPosQueueAck>[0] = {
       tenantId: order.tenantId || tenantId,
       table: order.tableNumber || tableNumber,
       tableNumber: order.tableNumber || tableNumber,
@@ -1437,6 +1437,10 @@ export default function HomePage({ forcedMode }: HomePageClientProps = {}) {
       submissionId: order.submissionId,
       transactionId: txId,
       orderIndex: order.orderIndex,
+    };
+    const submitPayload: (Parameters<typeof submitOrderWithPosQueueAck>[0] & { isRetry?: boolean }) = {
+      ...submitPayloadRaw,
+      isRetry: true,
     };
 
     setQueueScreen({
@@ -1655,6 +1659,7 @@ export default function HomePage({ forcedMode }: HomePageClientProps = {}) {
     selectedPaymentMethod: "CASHIER" | "QRIS",
     selectedProofFile?: File | null,
     overrideSubmissionId?: string,
+    isRetryCall = false,
   ) => {
     // 🔴 GUARD CLAUSE PALING ATAS - MENCEGAH DOUBLE CLICK / SPAM
     if (isSubmitting) return;
@@ -1707,7 +1712,7 @@ export default function HomePage({ forcedMode }: HomePageClientProps = {}) {
       note: item.note,
     }));
 
-    const submitPayload: Parameters<typeof submitOrderWithPosQueueAck>[0] = {
+    const submitPayload: Parameters<typeof submitOrderWithPosQueueAck>[0] & { isRetry?: boolean } = {
       tenantId,
       table: tableNumber,
       tableNumber,
@@ -1725,6 +1730,7 @@ export default function HomePage({ forcedMode }: HomePageClientProps = {}) {
       paxCount,
       transactionId,
       orderIndex,
+      isRetry: isRetryCall,
     };
 
     setQueueScreen({
@@ -1958,6 +1964,7 @@ export default function HomePage({ forcedMode }: HomePageClientProps = {}) {
       queueScreen.retryPayload.paymentMethod === "QRIS" ? "QRIS" : "CASHIER",
       queueScreen.retryPayload.paymentProofFile || null,
       subId,
+      true,
     );
   };
 
