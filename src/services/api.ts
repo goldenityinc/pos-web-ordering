@@ -1373,62 +1373,87 @@ export async function submitOrderWithPosQueueAck(
     const resultAny = finalResult as Record<string, unknown> | null | undefined;
     try {
       if (typeof window !== "undefined" && typeof localStorage !== "undefined") {
-        const STORAGE_KEY_TX = "goldenity:v1:activeTxId";
-        const STORAGE_KEY_ORDER = "goldenity:v1:activeOrderId";
-        const STORAGE_KEY_SUBMISSION = "goldenity:v1:activeSubmissionId";
-        const STORAGE_KEY_RECEIPT = "goldenity:v1:activeReceiptNumber";
-        const STORAGE_KEY_META = "goldenity:v1:activeOrderMeta";
+        // 🔴 CRITICAL HOTFIX TABLE-ISOLATION WRITE-SIDE:
+        //    Build scope from restInput (tenant/branch/table), lalu generate SCOPED storage keys.
+        //    Tulis ke DUA storage: SCOPED (isolated per meja, prioritas) + LEGACY global (backward compat
+        //    untuk user yang belum refresh tab & masih pakai parser legacy pertama kali).
+        const rAny = (restInput || {}) as Record<string, unknown>;
+        const writeScope: ActiveOrderScope = {
+          tenantId: (typeof rAny.tenantId === "string" ? rAny.tenantId : null) ?? (typeof rAny.tenant_id === "string" ? rAny.tenant_id : null),
+          branchId: (typeof rAny.branchId === "string" ? rAny.branchId : null) ?? (typeof rAny.branch_id === "string" ? rAny.branch_id : null),
+          tableId: (typeof rAny.tableId === "string" ? rAny.tableId : null) ?? (typeof rAny.table_id === "string" ? rAny.table_id : null),
+          tableNumber: (typeof rAny.tableNumber === "string" ? rAny.tableNumber : null) ?? (typeof rAny.table_number === "string" ? rAny.table_number : null),
+        };
+        const scopedKeys = _buildScopedActiveOrderKeys(writeScope);
+        const legacyKeys = {
+          tx: ACTIVE_TX_STORAGE_KEY,
+          order: ACTIVE_ORDER_STORAGE_KEY,
+          submission: ACTIVE_SUBMISSION_STORAGE_KEY,
+          receipt: ACTIVE_RECEIPT_STORAGE_KEY,
+          meta: ACTIVE_ORDER_META_KEY,
+        };
+        const allKeySets = [scopedKeys, legacyKeys];
 
         const extractTxId =
-          (restInput as Record<string, unknown>).transactionId ??
-          (restInput as Record<string, unknown>).transaction_id ??
+          rAny.transactionId ??
+          rAny.transaction_id ??
           resultAny?.transactionId ??
           resultAny?.transaction_id ??
           resultAny?.receiptNumber ??
           resultAny?.receipt_number ??
-          (restInput as Record<string, unknown>).receiptNumber ??
-          (restInput as Record<string, unknown>).receipt_number;
+          rAny.receiptNumber ??
+          rAny.receipt_number;
         const extractOrderId =
           resultAny?.orderId ??
           resultAny?.order_id ??
           resultAny?.id ??
-          (restInput as Record<string, unknown>).orderId ??
-          (restInput as Record<string, unknown>).order_id;
+          rAny.orderId ??
+          rAny.order_id;
         const extractSubmission =
           resultAny?.submissionId ??
           resultAny?.submission_id ??
-          (restInput as Record<string, unknown>).submissionId ??
-          (restInput as Record<string, unknown>).submission_id ??
+          rAny.submissionId ??
+          rAny.submission_id ??
           submissionId;
         const extractReceipt =
           resultAny?.receiptNumber ??
           resultAny?.receipt_number ??
-          (restInput as Record<string, unknown>).receiptNumber ??
-          (restInput as Record<string, unknown>).receipt_number;
-        if (extractTxId && typeof extractTxId === "string" && extractTxId.trim().length > 0) {
-          localStorage.setItem(STORAGE_KEY_TX, String(extractTxId).trim());
-        }
-        if (extractOrderId && typeof extractOrderId === "string" && String(extractOrderId).trim().length > 0) {
-          localStorage.setItem(STORAGE_KEY_ORDER, String(extractOrderId).trim());
-        }
-        if (extractSubmission && typeof extractSubmission === "string" && extractSubmission.trim().length > 0) {
-          localStorage.setItem(STORAGE_KEY_SUBMISSION, String(extractSubmission).trim());
-        }
-        if (extractReceipt && typeof extractReceipt === "string" && extractReceipt.trim().length > 0) {
-          localStorage.setItem(STORAGE_KEY_RECEIPT, String(extractReceipt).trim());
-        }
+          rAny.receiptNumber ??
+          rAny.receipt_number;
+
+        const metaObj: Record<string, unknown> = {
+          savedAt: new Date().toISOString(),
+          tenantId: rAny.tenantId ?? rAny.tenant_id ?? null,
+          branchId: rAny.branchId ?? rAny.branch_id ?? null,
+          tableId: rAny.tableId ?? rAny.table_id ?? null,
+          tableNumber: rAny.tableNumber ?? rAny.table_number ?? null,
+          success: (resultAny?.success === true),
+          ackStatus: resultAny?.ackStatus ?? null,
+        };
+        let metaJson: string | null = null;
         try {
-          const metaObj: Record<string, unknown> = {
-            savedAt: new Date().toISOString(),
-            tenantId: (restInput as Record<string, unknown>).tenantId,
-            branchId: (restInput as Record<string, unknown>).branchId,
-            tableId: (restInput as Record<string, unknown>).tableId,
-            success: (resultAny?.success === true),
-            ackStatus: resultAny?.ackStatus ?? null,
-          };
-          localStorage.setItem(STORAGE_KEY_META, JSON.stringify(metaObj));
+          metaJson = JSON.stringify(metaObj);
         } catch (_metaErr) {
-          // ignore JSON serialization issues for meta
+          metaJson = null;
+        }
+
+        // Tuliskan ke SEMUA set key (scoped + legacy) untuk kompatibilitas penuh.
+        for (const ks of allKeySets) {
+          if (extractTxId && typeof extractTxId === "string" && extractTxId.trim().length > 0) {
+            writeStorageValueSafely(ks.tx, String(extractTxId).trim());
+          }
+          if (extractOrderId && typeof extractOrderId === "string" && String(extractOrderId).trim().length > 0) {
+            writeStorageValueSafely(ks.order, String(extractOrderId).trim());
+          }
+          if (extractSubmission && typeof extractSubmission === "string" && extractSubmission.trim().length > 0) {
+            writeStorageValueSafely(ks.submission, String(extractSubmission).trim());
+          }
+          if (extractReceipt && typeof extractReceipt === "string" && extractReceipt.trim().length > 0) {
+            writeStorageValueSafely(ks.receipt, String(extractReceipt).trim());
+          }
+          if (metaJson) {
+            writeStorageValueSafely(ks.meta, metaJson);
+          }
         }
       }
     } catch (_lsErr) {
@@ -1692,6 +1717,68 @@ const ACTIVE_ORDER_STORAGE_KEY = "goldenity:v1:activeOrderId";
 const ACTIVE_SUBMISSION_STORAGE_KEY = "goldenity:v1:activeSubmissionId";
 const ACTIVE_RECEIPT_STORAGE_KEY = "goldenity:v1:activeReceiptNumber";
 const ACTIVE_ORDER_META_KEY = "goldenity:v1:activeOrderMeta";
+const ACTIVE_ORDER_SCOPE_PREFIX = "goldenity:v1:scoped-order:";
+
+export type ActiveOrderScope = {
+  tenantId?: string | null;
+  branchId?: string | null;
+  tableId?: string | null;
+  tableNumber?: string | null;
+};
+
+function _normalizeScopeSegment(value: unknown): string {
+  if (value === null || value === undefined) return "*";
+  const s = String(value).trim().toLowerCase();
+  if (s.length === 0) return "*";
+  return s.replace(/[^a-z0-9_-]+/g, "-");
+}
+
+function _scopeMatchesMeta(meta: Record<string, unknown> | null | undefined, scope?: ActiveOrderScope | null): boolean {
+  if (!scope) return true;
+  if (!meta || typeof meta !== "object") return false;
+  const wantTenant = _normalizeScopeSegment(scope.tenantId);
+  const wantBranch = _normalizeScopeSegment(scope.branchId);
+  const wantTable = _normalizeScopeSegment(scope.tableId ?? scope.tableNumber);
+  const haveTenant = _normalizeScopeSegment((meta as any).tenantId ?? (meta as any).tenant_id);
+  const haveBranch = _normalizeScopeSegment((meta as any).branchId ?? (meta as any).branch_id);
+  const haveTable = _normalizeScopeSegment(
+    (meta as any).tableId ?? (meta as any).table_id ?? (meta as any).tableNumber ?? (meta as any).table_number,
+  );
+  if (wantTenant !== "*" && haveTenant !== "*" && wantTenant !== haveTenant) return false;
+  if (wantBranch !== "*" && haveBranch !== "*" && wantBranch !== haveBranch) return false;
+  if (wantTable !== "*" && haveTable !== "*" && wantTable !== haveTable) return false;
+  return true;
+}
+
+function _buildScopedActiveOrderKeys(scope?: ActiveOrderScope | null) {
+  const noScope =
+    !scope ||
+    (_normalizeScopeSegment(scope.tenantId) === "*" &&
+      _normalizeScopeSegment(scope.branchId) === "*" &&
+      _normalizeScopeSegment(scope.tableId ?? scope.tableNumber) === "*");
+  if (noScope) {
+    return {
+      tx: ACTIVE_TX_STORAGE_KEY,
+      order: ACTIVE_ORDER_STORAGE_KEY,
+      submission: ACTIVE_SUBMISSION_STORAGE_KEY,
+      receipt: ACTIVE_RECEIPT_STORAGE_KEY,
+      meta: ACTIVE_ORDER_META_KEY,
+    };
+  }
+  const tag = [
+    _normalizeScopeSegment(scope.tenantId),
+    _normalizeScopeSegment(scope.branchId),
+    _normalizeScopeSegment(scope.tableId ?? scope.tableNumber),
+  ].join("::");
+  const prefix = `${ACTIVE_ORDER_SCOPE_PREFIX}${tag}::`;
+  return {
+    tx: `${prefix}activeTxId`,
+    order: `${prefix}activeOrderId`,
+    submission: `${prefix}activeSubmissionId`,
+    receipt: `${prefix}activeReceiptNumber`,
+    meta: `${prefix}activeOrderMeta`,
+  };
+}
 
 export type PersistedActiveOrderSnapshot = {
   transactionId: string | null;
@@ -1714,7 +1801,60 @@ function readStorageValueSafely(key: string): string | null {
   }
 }
 
-export function getPersistedActiveOrder(): PersistedActiveOrderSnapshot {
+function writeStorageValueSafely(key: string, value: string): void {
+  if (typeof window === "undefined" || typeof localStorage === "undefined") return;
+  try {
+    localStorage.setItem(key, value);
+  } catch {
+    /* noop */
+  }
+}
+
+function removeStorageValueSafely(key: string): void {
+  if (typeof window === "undefined" || typeof localStorage === "undefined") return;
+  try {
+    localStorage.removeItem(key);
+  } catch {
+    /* noop */
+  }
+}
+
+export function getPersistedActiveOrder(scope?: ActiveOrderScope | null): PersistedActiveOrderSnapshot {
+  // 🔴 CRITICAL HOTFIX TABLE-ISOLATION:
+  //    SELALU prefer scoped storage JIKA scope disediakan (tenant/branch/table).
+  //    Jika scope diberikan, storage LEGACY global HANYA dipakai jika meta-nya MATCH scope
+  //    (migrasi backward-compat sekali pertama). Ini mencegah Meja 5 membaca
+  //    transactionId milik Meja 1.
+  const scoped = scope ? _buildScopedActiveOrderKeys(scope) : null;
+  if (scoped) {
+    const sTxId = readStorageValueSafely(scoped.tx);
+    const sOrderId = readStorageValueSafely(scoped.order);
+    const sSubmission = readStorageValueSafely(scoped.submission);
+    const sReceipt = readStorageValueSafely(scoped.receipt);
+    let sMeta: Record<string, unknown> | null = null;
+    try {
+      const raw = readStorageValueSafely(scoped.meta);
+      if (raw) {
+        const parsed = JSON.parse(raw);
+        if (parsed && typeof parsed === "object") sMeta = parsed as Record<string, unknown>;
+      }
+    } catch {
+      sMeta = null;
+    }
+    const sFound = Boolean(sTxId || sOrderId || sSubmission || sReceipt);
+    if (sFound) {
+      return {
+        transactionId: sTxId,
+        orderId: sOrderId,
+        submissionId: sSubmission,
+        receiptNumber: sReceipt,
+        meta: sMeta,
+        found: true,
+      };
+    }
+  }
+
+  // Fallback LEGACY (global keys) — hanya pakai jika scope match meta (untuk migrasi).
   const txId = readStorageValueSafely(ACTIVE_TX_STORAGE_KEY);
   const orderId = readStorageValueSafely(ACTIVE_ORDER_STORAGE_KEY);
   const submissionId = readStorageValueSafely(ACTIVE_SUBMISSION_STORAGE_KEY);
@@ -1729,6 +1869,13 @@ export function getPersistedActiveOrder(): PersistedActiveOrderSnapshot {
   } catch {
     meta = null;
   }
+
+  if (scope && !_scopeMatchesMeta(meta, scope)) {
+    // LEGACY punya data tapi scope tidak cocok → ini adalah BUG Meja5 baca Meja1.
+    // HARD INVALIDATE: jangan return found.
+    return { transactionId: null, orderId: null, submissionId: null, receiptNumber: null, meta: null, found: false };
+  }
+
   const found = Boolean(txId || orderId || submissionId || receiptNumber);
   return {
     transactionId: txId,
@@ -1740,32 +1887,38 @@ export function getPersistedActiveOrder(): PersistedActiveOrderSnapshot {
   };
 }
 
-export function clearPersistedActiveOrder(): void {
-  if (typeof window === "undefined" || typeof localStorage === "undefined") return;
-  try {
-    localStorage.removeItem(ACTIVE_TX_STORAGE_KEY);
-  } catch {
-    /* noop */
-  }
-  try {
-    localStorage.removeItem(ACTIVE_ORDER_STORAGE_KEY);
-  } catch {
-    /* noop */
-  }
-  try {
-    localStorage.removeItem(ACTIVE_SUBMISSION_STORAGE_KEY);
-  } catch {
-    /* noop */
-  }
-  try {
-    localStorage.removeItem(ACTIVE_RECEIPT_STORAGE_KEY);
-  } catch {
-    /* noop */
-  }
-  try {
-    localStorage.removeItem(ACTIVE_ORDER_META_KEY);
-  } catch {
-    /* noop */
+export function clearPersistedActiveOrder(scope?: ActiveOrderScope | null): void {
+  const keys = _buildScopedActiveOrderKeys(scope);
+  removeStorageValueSafely(keys.tx);
+  removeStorageValueSafely(keys.order);
+  removeStorageValueSafely(keys.submission);
+  removeStorageValueSafely(keys.receipt);
+  removeStorageValueSafely(keys.meta);
+  // Jika scope disediakan, juga LEGACY global hanya clear jika meta-nya match scope.
+  if (scope) {
+    try {
+      const rawMeta = readStorageValueSafely(ACTIVE_ORDER_META_KEY);
+      if (rawMeta) {
+        const parsed = JSON.parse(rawMeta);
+        const metaObj = parsed && typeof parsed === "object" ? (parsed as Record<string, unknown>) : null;
+        if (_scopeMatchesMeta(metaObj, scope)) {
+          removeStorageValueSafely(ACTIVE_TX_STORAGE_KEY);
+          removeStorageValueSafely(ACTIVE_ORDER_STORAGE_KEY);
+          removeStorageValueSafely(ACTIVE_SUBMISSION_STORAGE_KEY);
+          removeStorageValueSafely(ACTIVE_RECEIPT_STORAGE_KEY);
+          removeStorageValueSafely(ACTIVE_ORDER_META_KEY);
+        }
+      }
+    } catch {
+      /* noop */
+    }
+  } else {
+    // Clear legacy juga (tanpa scope = global clear).
+    removeStorageValueSafely(ACTIVE_TX_STORAGE_KEY);
+    removeStorageValueSafely(ACTIVE_ORDER_STORAGE_KEY);
+    removeStorageValueSafely(ACTIVE_SUBMISSION_STORAGE_KEY);
+    removeStorageValueSafely(ACTIVE_RECEIPT_STORAGE_KEY);
+    removeStorageValueSafely(ACTIVE_ORDER_META_KEY);
   }
 }
 

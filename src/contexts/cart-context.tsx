@@ -163,7 +163,11 @@ export function CartProvider({ children }: CartProviderProps) {
   const fetchPersistedOrderFromStorage = async () => {
     let snapshot: PersistedActiveOrderSnapshot;
     try {
-      snapshot = getPersistedActiveOrder();
+      // 🔴 CRITICAL HOTFIX: Pass scope table-aktif agar getPersistedActiveOrder TIDAK
+      //    pernah me-return data milik meja lain (misal TX-ID sisa Meja 1 saat Meja 5 dibuka).
+      snapshot = getPersistedActiveOrder(scope
+        ? { tenantId: scope.tenantId, branchId: scope.branchId, tableId: scope.tableId, tableNumber: scope.tableNumber }
+        : undefined);
     } catch {
       snapshot = {
         transactionId: null,
@@ -239,7 +243,11 @@ export function CartProvider({ children }: CartProviderProps) {
     (async () => {
       let snapshot: PersistedActiveOrderSnapshot;
       try {
-        snapshot = getPersistedActiveOrder();
+        // 🔴 CRITICAL HOTFIX: Pass scope table-aktif agar getPersistedActiveOrder TIDAK
+        //    pernah me-return data milik meja lain (misal TX-ID sisa Meja 1 saat Meja 5 dibuka).
+        snapshot = getPersistedActiveOrder(scope
+          ? { tenantId: scope.tenantId, branchId: scope.branchId, tableId: scope.tableId, tableNumber: scope.tableNumber }
+          : undefined);
       } catch {
         snapshot = {
           transactionId: null,
@@ -335,7 +343,11 @@ export function CartProvider({ children }: CartProviderProps) {
       },
       clear: () => {
         try {
-          clearActiveOrderStorage();
+          // 🔴 CRITICAL HOTFIX: Clear storage sesuai scope aktif, bukan global.
+          //    Jangan sampai clear() Meja 5 malah menghapus data persist Meja 1.
+          clearActiveOrderStorage(scope
+            ? { tenantId: scope.tenantId, branchId: scope.branchId, tableId: scope.tableId, tableNumber: scope.tableNumber }
+            : undefined);
         } catch {
           /* noop */
         }
@@ -373,6 +385,33 @@ export function CartProvider({ children }: CartProviderProps) {
           if (prevKey === nextKey && prevScope === nextScope) {
             return prevScope;
           }
+          // 🔴 CRITICAL HOTFIX: Saat scope berganti (user PINDAH MEJA),
+          //    SEGERA invalidate snapshot & clear storage scope LAMA.
+          //    Ini mencegah Meja 5 menampilkan transactionId sisa Meja 1
+          //    selama jendela sebelum useEffect (mount) re-fetch jalan.
+          if (prevScope) {
+            try {
+              clearActiveOrderStorage({
+                tenantId: prevScope.tenantId,
+                branchId: prevScope.branchId,
+                tableId: prevScope.tableId,
+                tableNumber: prevScope.tableNumber,
+              });
+            } catch (_noop) {
+              /* noop */
+            }
+          }
+          setPersistedSnapshot({
+            transactionId: null,
+            orderId: null,
+            submissionId: null,
+            receiptNumber: null,
+            meta: null,
+            found: false,
+          });
+          setPersistedOrders(null);
+          setPersistedFetchError(null);
+          setPersistedFetchedAt(new Date().toISOString());
           return nextScope;
         });
       },
