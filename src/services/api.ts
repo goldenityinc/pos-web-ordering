@@ -862,13 +862,26 @@ export async function pollOrderAckStatus({
 
       let statusDone = false;
       if (flyingRequest === null) {
-        const pathSegment = orderId
-          ? encodeURIComponent(String(orderId))
-          : submissionId
-          ? `by-submission/${encodeURIComponent(submissionId)}`
-          : null;
+        // 🔴 CRITICAL FIX POLL ACK DESYNC (Fallback Dup Candidate):
+        //    Bridge Idempotency Rewrite V2 ubah submissionId collision menjadi
+        //    ORIGINAL__dup_1..99. Frontend polling pakai ORIGINAL key (tanpa suffix).
+        //    Jika Bridge belum deploy versi mirror (yang set 2 key sekaligus), polling
+        //    ORIGINAL => NULL => TIMEOUT padahal POS sukses print!
+        //    SOLUSI (double safety layer): Build array candidates = ORIGINAL + __dup_1..5.
+        //    Loop semua candidate dalam SATU polling tick — jika salah satu return
+        //    POS_PRINTED / POS_ACKNOWLEDGED = langsung anggap SUCCESS.
+        const candidatePathSegments: string[] = [];
+        if (orderId !== undefined && orderId !== null && String(orderId).trim() !== "") {
+          candidatePathSegments.push(encodeURIComponent(String(orderId)));
+        } else if (submissionId) {
+          candidatePathSegments.push(`by-submission/${encodeURIComponent(submissionId)}`);
+          const MAX_REWRITE_CANDIDATES = 5;
+          for (let i = 1; i <= MAX_REWRITE_CANDIDATES; i++) {
+            candidatePathSegments.push(`by-submission/${encodeURIComponent(`${submissionId}__dup_${i}`)}`);
+          }
+        }
 
-        if (!pathSegment) {
+        if (candidatePathSegments.length === 0) {
           pollSucceededCleanly = true;
           return {
             ackStatus: "FAILED_DELIVERY",
@@ -876,54 +889,72 @@ export async function pollOrderAckStatus({
           };
         }
 
-        // 🔴 FIX 401 Unauthorized polling ACK status:
-        //    Bridge /api/v1/orders/* route PROTECTED (butuh Bearer tenant token).
-        //    Web Ordering TIDAK punya token → wajib pakai BYPASS prefix /relay/
-        //    DAN kirim header "X-Internal-Relay: 1" untuk tenantResolver Bridge
-        //    melakukan bypass Bearer auth dan resolve tenant dari query/body.
-        const url = new URL(
-          `/api/v1/relay/orders/${pathSegment}/ack-status`,
-          BRIDGE_API_URL,
-        );
-        url.searchParams.set("tenantId", tenantId);
-        if (branchId?.trim()) {
-          url.searchParams.set("branchId", branchId.trim());
-        }
-
         const fetchPromise = (async () => {
           try {
-            const resp = await fetch(url.toString(), {
-              method: "GET",
-              headers: {
-                "Content-Type": "application/json",
-                "X-Internal-Relay": "1",
-              },
-              cache: "no-store",
-              signal: abortCtrl.signal,
-            });
-            if (resp.ok) {
+            // Loop semua candidate (ORIGINAL + dup_1..5) di dalam 1 polling tick.
+            // Berhenti di candidate pertama yang mereturn status terminal.
+            for (let ci = 0; ci < candidatePathSegments.length; ci++) {
+              const pathSegment = candidatePathSegments[ci];
               try {
-                const data = (await resp.json()) as Record<string, unknown>;
-                const ackStatus =
-                  toStringOrUndefined(data.ackStatus) ??
-                  toStringOrUndefined(data.ack_status) ??
-                  "";
-                const ackMessage =
-                  toStringOrUndefined(data.ackMessage) ??
-                  toStringOrUndefined(data.ack_message) ??
-                  toStringOrUndefined(data.message);
-                if (
-                  ackStatus === "POS_PRINTED" ||
-                  ackStatus === "POS_ACKNOWLEDGED" ||
-                  ackStatus === "FAILED_DELIVERY"
-                ) {
+                // 🔴 FIX 401 Unauthorized polling ACK status:
+                //    Bridge /api/v1/orders/* route PROTECTED (butuh Bearer tenant token).
+                //    Web Ordering TIDAK punya token → wajib pakai BYPASS prefix /relay/
+                //    DAN kirim header "X-Internal-Relay: 1" untuk tenantResolver Bridge
+                //    melakukan bypass Bearer auth dan resolve tenant dari query/body.
+                const url = new URL(
+                  `/api/v1/relay/orders/${pathSegment}/ack-status`,
+                  BRIDGE_API_URL,
+                );
+                url.searchParams.set("tenantId", tenantId);
+                if (branchId?.trim()) {
+                  url.searchParams.set("branchId", branchId.trim());
+                }
+
+                const resp = await fetch(url.toString(), {
+                  method: "GET",
+                  headers: {
+                    "Content-Type": "application/json",
+                    "X-Internal-Relay": "1",
+                  },
+                  cache: "no-store",
+                  signal: abortCtrl.signal,
+                });
+                if (resp.ok) {
+                  try {
+                    const data = (await resp.json()) as Record<string, unknown>;
+                    const ackStatus =
+                      toStringOrUndefined(data.ackStatus) ??
+                      toStringOrUndefined(data.ack_status) ??
+                      "";
+                    const ackMessage =
+                      toStringOrUndefined(data.ackMessage) ??
+                      toStringOrUndefined(data.ack_message) ??
+                      toStringOrUndefined(data.message);
+                    if (
+                      ackStatus === "POS_PRINTED" ||
+                      ackStatus === "POS_ACKNOWLEDGED" ||
+                      ackStatus === "FAILED_DELIVERY"
+                    ) {
+                      statusDone = true;
+                      flyingRequest = null;
+                      pollSucceededCleanly = true;
+                      cleanup();
+                      return { ackStatus, ackMessage, done: true };
+                    }
+                  } catch (_parseErr) {}
+                }
+              } catch (_segErr) {
+                if (_segErr && (_segErr as any).name === "AbortError") {
                   statusDone = true;
                   flyingRequest = null;
                   pollSucceededCleanly = true;
                   cleanup();
-                  return { ackStatus, ackMessage, done: true };
+                  return { ackStatus: "CANCELLED", error: "Cancelled", done: true };
                 }
-              } catch (_parseErr) {}
+                // Lanjut ke candidate berikutnya jika fetch gagal
+              }
+              if (abortCtrl.signal.aborted) break;
+              if (statusDone) break;
             }
           } catch (_pollErr) {
             if (_pollErr && (_pollErr as any).name === "AbortError") {
