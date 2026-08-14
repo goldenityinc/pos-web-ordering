@@ -1616,6 +1616,11 @@ export default function HomePage({ forcedMode }: HomePageClientProps = {}) {
     } else if (qrisImageUrl && !allowPayAtCashier) {
       setIsPaymentMethodModalOpen(false);
       if (isMounted) safeSetStorage(AWAITING_PAYMENT_KEY, "0");
+      // ⚠️ FIX NEW ISSUE #3: WAJIB setIsCheckoutOpen(true) DULU
+      //    karena wrapper modal QRIS page rendering hanya aktif SAAT isCheckoutOpen=true!
+      //    (Bug: user di Order List pilih Bayar QRIS → state isQrisFlowOpen=true tapi TIDAK TERLIHAT
+      //     karena wrapper isCheckoutOpen=false sejak checkout menu ditutup).
+      setIsCheckoutOpen(true);
       setIsQrisFlowOpen(true);
     } else {
       setIsPaymentMethodModalOpen(false);
@@ -1635,6 +1640,11 @@ export default function HomePage({ forcedMode }: HomePageClientProps = {}) {
       setIsPaymentMethodModalOpen(false);
       if (method === "QRIS") {
         if (isMounted) safeSetStorage(AWAITING_PAYMENT_KEY, "0");
+        // ⚠️ FIX NEW ISSUE #3 (CRITICAL): Buka wrapper modal checkout DULU
+        //    SEBELUM setIsQrisFlowOpen(true). Tanpa ini, user yang pilih Bayar QRIS
+        //    DARI ORDER LIST (bukan dari menu cart) AKAN TIDAK MELIHAT APA-APA
+        //    karena {isCheckoutOpen && (QrisFlow)} gate di L3025 TERTUTUP!
+        setIsCheckoutOpen(true);
         setIsQrisFlowOpen(true);
       } else {
         if (isMounted) safeSetStorage(AWAITING_PAYMENT_KEY, "1");
