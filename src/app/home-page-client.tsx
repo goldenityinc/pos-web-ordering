@@ -322,7 +322,14 @@ export default function HomePage({ forcedMode }: HomePageClientProps = {}) {
       };
       const scopeStr = JSON.stringify(currentScope);
       const stored = safeGetStorage(STORED_SCOPE_KEY) || "";
-      const storedTxId = safeGetStorage(ACTIVE_TX_ID_KEY) || "";
+      // 🔴 FIX V2: storedTxId SEKARANG READ DARI DUA SUMBER (agar cleanup migration aman):
+      //    1. Scoped key (L558) = untuk scope aktif baru
+      //    2. Legacy global key (L562) = sisa app versi lama, harus di-cleanup juga
+      //    (Sebelumnya cuma baca scoped key → legacy global yang mengandung data meja1
+      //     TIDAK KE-CLEANUP pindah ke meja5 → kebocoran TX-ID SAMA kasus ini terjadi!)
+      const newScopedTx = safeGetStorage(ACTIVE_TX_ID_KEY) || "";
+      const legacyGlobalTx = safeGetStorage(LEGACY_GLOBAL_ACTIVE_TX_ID_KEY) || "";
+      const storedTxId = newScopedTx || legacyGlobalTx;
 
       const storedIsEmpty = stored === "" || stored === "{}";
       const scopeMatches = !storedIsEmpty && stored === scopeStr;
@@ -358,12 +365,17 @@ export default function HomePage({ forcedMode }: HomePageClientProps = {}) {
       if (scopeTableChanged || storedIsEmpty) {
         if (storedTxId) {
           safeRemoveStorage(buildOrdersStorageKey(storedTxId));
+          // Cleanup LEGACY (global unprefixed) orders storage juga
+          try { safeRemoveStorage(`${APP_STORAGE_PREFIX}orders_transaction_${storedTxId}`); } catch (_) {}
           safeRemoveStorage(`${APP_STORAGE_PREFIX}paxCount_${storedTxId}`);
           safeRemoveStorage(`${APP_STORAGE_PREFIX}customerName_${storedTxId}`);
         }
+        // Cleanup BOTH: scoped keys (baru) + legacy global (versi lama)
         safeRemoveStorage(ACTIVE_TX_ID_KEY);
         safeRemoveStorage(ACTIVE_ORDER_IDX_KEY);
         safeRemoveStorage(AWAITING_PAYMENT_KEY);
+        try { safeRemoveStorage(LEGACY_GLOBAL_ACTIVE_TX_ID_KEY); } catch (_) {}
+        try { safeRemoveStorage(LEGACY_GLOBAL_ACTIVE_ORDER_IDX_KEY); } catch (_) {}
         safeRemoveStorage(`${APP_STORAGE_PREFIX}lastPaymentTx`);
         safeRemoveStorage(`${APP_STORAGE_PREFIX}qr_order_progress`);
         try {
@@ -395,6 +407,12 @@ export default function HomePage({ forcedMode }: HomePageClientProps = {}) {
         if (typeof clearCart === "function") {
           try { clearCart(); } catch (_e) { /* ignore */ }
         }
+        // 🔴 CRITICAL FIX V2 (FORCE REGEN TX-ID BARU SAAT PINDAH MEJA):
+        //    Sebelumnya storage di-clear tapi TX-ID generate BARU hanya terjadi LAZY
+        //    (ketika getOrCreateTransactionId dipanggil pertama kali → bisa race
+        //    dengan submit order Meja 1 / Meja 5 di ms yang sama → Date.now() SAMA).
+        //    SOLUSI: SEGERA generate ID BARU setelah cleanup scope berganti.
+        try { void getOrCreateTransactionId(); } catch (_e) {}
       }
       safeSetStorage(STORED_SCOPE_KEY, scopeStr);
     } catch (_e) {
@@ -521,12 +539,49 @@ export default function HomePage({ forcedMode }: HomePageClientProps = {}) {
     void run();
   }, [branchId, isCheckoutOpen, isSettingsMode, tenantId]);
 
-  const ACTIVE_TX_ID_KEY = `${APP_STORAGE_PREFIX}activeTransactionId`;
-  const ACTIVE_ORDER_IDX_KEY = `${APP_STORAGE_PREFIX}activeOrderIndex`;
-  const AWAITING_PAYMENT_KEY = `${APP_STORAGE_PREFIX}awaitingPayment`;
+  // 🔴 CRITICAL FIX V2 (TX-ID MASIH SAMA Meja 1 & Meja 5):
+  //    SEBELUMNYA 3 storage keys TOTAL GLOBAL → semua meja baca-tulis key SAMA!
+  //    Hasilnya: User buka meja A submit → pindah meja B → scope berubah (L358 hapus
+  //    → meja B regenerate Date.now() kebetulan sama (timestamp ms sama) → TX-ID SAMA.
+  //    SOLUSI:
+  //    a) STORAGE KEYS SCOPED per (prefix `${APP_STORAGE_PREFIX}scoped-tx::tnt{tenant}::br{branch}::tbl{tableId}/tblNo{tableNumber}::`.
+  //    b) Generator TX-ID pakai suffix `${tableTag}-${randomHex(6)}` agar JIKA timestamp
+  //       Date.now() SAMA PERSIS 2 meja submit paralel → TETAP BEDA (random uniqueness).
+  //    c) getOrCreateTransactionId FORCE REGENERATE jika scope berganti (jangan reuse).
+  const _buildScopeTag = (): string => {
+    const t = (tenantId || "").toString().trim().toLowerCase().replace(/[^a-z0-9_-]+/g, "-") || "*";
+    const b = (branchId || "").toString().trim().toLowerCase().replace(/[^a-z0-9_-]+/g, "-") || "*";
+    const ti = (tableId || "").toString().trim().toLowerCase().replace(/[^a-z0-9_-]+/g, "-") || "*";
+    const tn = (tableNumber || "").toString().trim().toLowerCase().replace(/[^a-z0-9_-]+/g, "-") || "*";
+    return `tnt:${t}:br:${b}:tid:${ti}:tno:${tn}`;
+  };
+  const _buildTableTagForIdValue = (): string => {
+    // Untuk DIMENSION IDENTITY yang lebih pendek (embedded ke TX-ID suffix agar mudah dibaca.
+    const ti = (tableId || "").toString().trim();
+    const tn = (tableNumber || "").toString().trim();
+    const raw = ti && ti.length <= 12 ? ti : tn && tn.length <= 12 ? tn : "tbl";
+    return raw.toLowerCase().replace(/[^a-z0-9_-]+/g, "-") || "tbl";
+  };
+  const _generateRandomHex6 = (): string => {
+    try {
+      if (typeof crypto !== "undefined" && "getRandomValues" in crypto && typeof Uint8Array !== "undefined") {
+        const bytes = new Uint8Array(3);
+        (crypto as Crypto).getRandomValues(bytes);
+        return Array.from(bytes).map((b) => b.toString(16).padStart(2, "0")).join("");
+      }
+    } catch (_) {}
+    return Math.random().toString(16).slice(2, 8).padEnd(6, "0");
+  };
+  const _scopeTag = _buildScopeTag();
+  const ACTIVE_TX_ID_KEY = `${APP_STORAGE_PREFIX}scoped-tx::${_scopeTag}::activeTransactionId`;
+  const ACTIVE_ORDER_IDX_KEY = `${APP_STORAGE_PREFIX}scoped-tx::${_scopeTag}::activeOrderIndex`;
+  const AWAITING_PAYMENT_KEY = `${APP_STORAGE_PREFIX}scoped-tx::${_scopeTag}::awaitingPayment`;
+  // 🔴 LEGACY GLOBAL KEYS (hanya untuk cleanup migrasi stale entries global → kita tetap bisa read-once dihapus jika tidak dipakai lagi (old data meja lain):
+  const LEGACY_GLOBAL_ACTIVE_TX_ID_KEY = `${APP_STORAGE_PREFIX}activeTransactionId`;
+  const LEGACY_GLOBAL_ACTIVE_ORDER_IDX_KEY = `${APP_STORAGE_PREFIX}activeOrderIndex`;
 
   const buildOrdersStorageKey = (txId: string) =>
-    `${APP_STORAGE_PREFIX}orders_transaction_${txId}`;
+    `${APP_STORAGE_PREFIX}scoped-tx::${_scopeTag}::orders_transaction_${txId}`;
 
   const getOrCreateTransactionId = (): string => {
     if (!isMounted) return "";
@@ -534,7 +589,13 @@ export default function HomePage({ forcedMode }: HomePageClientProps = {}) {
     if (existing && existing.trim()) {
       return existing.trim();
     }
-    const newId = `TX-${Date.now()}`;
+    const tableTag = _buildTableTagForIdValue();
+    const rand = _generateRandomHex6();
+    // ✅ Format collision-safe: TX-${Date.now()}-${table}-${random6}
+    // 2 Meja berbeda submit pada MILLISECOND SAMA → Date.now() sama → tableTag berbeda &
+    // (meja1 vs meja5 beda → guaranteed TETAP BEDA (tableTag + random6
+    // minimal 1/16^6 collision chance negligible.
+    const newId = `TX-${Date.now()}-${tableTag}-${rand}`;
     safeSetStorage(ACTIVE_TX_ID_KEY, newId);
     return newId;
   };
@@ -562,6 +623,10 @@ export default function HomePage({ forcedMode }: HomePageClientProps = {}) {
     safeRemoveStorage(ACTIVE_TX_ID_KEY);
     safeRemoveStorage(ACTIVE_ORDER_IDX_KEY);
     safeRemoveStorage(AWAITING_PAYMENT_KEY);
+    // Cleanup legacy global (jika ada sisa dari versi sebelumnya agar tidak
+    // mencampuri scope table lain):
+    try { safeRemoveStorage(LEGACY_GLOBAL_ACTIVE_TX_ID_KEY); } catch (_) {}
+    try { safeRemoveStorage(LEGACY_GLOBAL_ACTIVE_ORDER_IDX_KEY); } catch (_) {}
     if (txId) {
       safeRemoveStorage(buildOrdersStorageKey(txId));
     }
