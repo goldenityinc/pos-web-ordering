@@ -818,7 +818,28 @@ export async function pollOrderAckStatus({
   submissionId?: string;
   maxSeconds?: number;
   onTick?: (remainingSec: number) => void;
-}): Promise<{ ackStatus: string; ackMessage?: string; error?: string }> {
+}): Promise<{
+  ackStatus: string;
+  ackMessage?: string;
+  error?: string;
+  grandTotal?: number;
+  totalAmount?: number;
+  orderSummary?: Record<string, unknown> & {
+    grandTotalInt?: number;
+    itemsCount?: number;
+    items?: unknown[];
+    tableName?: string;
+    transactionId?: string;
+    salesRecordId?: string;
+    currency?: string;
+  };
+  items?: unknown[];
+  tableName?: string;
+  transactionId?: string;
+  salesRecordId?: string;
+  currency?: string;
+  rawBridgePayload?: unknown;
+}> {
   // 🔴 STRICT MUTEX PER submissionId/orderId + AbortController:
   //    Jika pollOrderAckStatus dipanggil BERULANG KALI untuk submission YANG SAMA
   //    (karena double submit bug / re-render spam), maka poll LAMA di-abort
@@ -930,6 +951,102 @@ export async function pollOrderAckStatus({
                       toStringOrUndefined(data.ackMessage) ??
                       toStringOrUndefined(data.ack_message) ??
                       toStringOrUndefined(data.message);
+
+                    // 🔥🔥🔥 FIX BUG 2 QRIS GRAND TOTAL RP 0 (CLIENT SIDE):
+                    //    Bridge posRelayRoutes SEKARANG return payload RICHER:
+                    //    TOP LEVEL fields: grandTotal, totalAmount, orderSummary,
+                    //    items (dari finalizeResolve orderSummary yang baru kita fix).
+                    //    DULU polling return HANYA ackStatus + ackMessage → data grandTotal
+                    //    HILANG ditengah jalan → UI QRIS Step 1 fallback ke 0!
+                    //    SEKARANG: EKSTRAK SEMUA payload penting dari data dan TERUSKAN
+                    //    ke return value polling function.
+                    const rawOrderSummary: unknown = data.orderSummary ?? (data.detail as any)?.orderSummary ?? null;
+                    const extractedGrandTotalInt: number = (() => {
+                      const candTop: unknown[] = [
+                        data.grandTotal,
+                        data.totalAmount,
+                        (data.detail as any)?.grandTotal,
+                        (data.detail as any)?.totalAmount,
+                      ];
+                      for (const v of candTop) {
+                        if (v == null) continue;
+                        const n = typeof v === "number" ? v : Number(String(v).replace(/[^0-9.\-]/g, ""));
+                        if (!Number.isNaN(n) && n > 0) return Math.round(n);
+                      }
+                      if (rawOrderSummary && typeof rawOrderSummary === "object") {
+                        const os = rawOrderSummary as Record<string, unknown>;
+                        const candInner: unknown[] = [os.grandTotalInt, os.grandTotal, os.totalAmount, os.total_amount];
+                        for (const v of candInner) {
+                          if (v == null) continue;
+                          const n = typeof v === "number" ? v : Number(String(v).replace(/[^0-9.\-]/g, ""));
+                          if (!Number.isNaN(n) && n > 0) return Math.round(n);
+                        }
+                      }
+                      return 0;
+                    })();
+                    const extractedItems: any[] = (() => {
+                      if (rawOrderSummary && typeof rawOrderSummary === "object" && Array.isArray((rawOrderSummary as any).items)) {
+                        return (rawOrderSummary as any).items;
+                      }
+                      if (Array.isArray(data.items)) return data.items as any[];
+                      if (data.detail && typeof data.detail === "object" && Array.isArray((data.detail as any).items)) return (data.detail as any).items;
+                      return [];
+                    })();
+                    const extractedTableName: string = (() => {
+                      if (rawOrderSummary && typeof rawOrderSummary === "object") {
+                        const os = rawOrderSummary as Record<string, unknown>;
+                        const cand = [os.tableName, os.table_number, os.tableNumber, os.table];
+                        for (const v of cand) if (v != null && String(v).trim()) return String(v).trim();
+                      }
+                      if (data.tableName != null) return String(data.tableName).trim();
+                      if (data.detail && typeof data.detail === "object") {
+                        const d = data.detail as any;
+                        for (const v of [d.tableName, d.table_number, d.tableNumber, d.table]) {
+                          if (v != null && String(v).trim()) return String(v).trim();
+                        }
+                      }
+                      return "";
+                    })();
+                    const extractedTransactionId: string = (() => {
+                      if (rawOrderSummary && typeof rawOrderSummary === "object") {
+                        const os = rawOrderSummary as Record<string, unknown>;
+                        const cand = [os.transactionId, os.txId, os.transaction_id];
+                        for (const v of cand) if (v != null && String(v).trim()) return String(v).trim();
+                      }
+                      return String(data.transactionId ?? data.txId ?? data.transaction_id ?? "").trim();
+                    })();
+                    const extractedSalesRecordId: string = (() => {
+                      if (rawOrderSummary && typeof rawOrderSummary === "object") {
+                        const os = rawOrderSummary as Record<string, unknown>;
+                        if (os.salesRecordId != null) return String(os.salesRecordId).trim();
+                      }
+                      return String(data.salesRecordId ?? data.sales_record_id ?? "").trim();
+                    })();
+                    const extractedItemsCount: number = (() => {
+                      if (rawOrderSummary && typeof rawOrderSummary === "object" && (rawOrderSummary as any).itemsCount != null) {
+                        const n = Number((rawOrderSummary as any).itemsCount);
+                        if (!Number.isNaN(n) && n >= 0) return n;
+                      }
+                      return Array.isArray(extractedItems) ? extractedItems.length : 0;
+                    })();
+                    const extractedCurrency: string = (() => {
+                      if (rawOrderSummary && typeof rawOrderSummary === "object" && (rawOrderSummary as any).currency) return String((rawOrderSummary as any).currency).trim();
+                      return String(data.currency ?? "IDR").trim() || "IDR";
+                    })();
+                    // Build enriched summary object untuk diteruskan ke UI layer.
+                    // Jika nanti butuh field tambah dari response detail (table_id, branch_id, dll),
+                    // tinggal tambah di sini tanpa rubah downstream logic!
+                    const enrichedOrderSummary = rawOrderSummary && typeof rawOrderSummary === "object"
+                      ? { ...(rawOrderSummary as any) }
+                      : {};
+                    enrichedOrderSummary.grandTotalInt = extractedGrandTotalInt;
+                    enrichedOrderSummary.itemsCount = extractedItemsCount;
+                    enrichedOrderSummary.items = extractedItems;
+                    if (extractedTableName && !enrichedOrderSummary.tableName) enrichedOrderSummary.tableName = extractedTableName;
+                    if (extractedTransactionId && !enrichedOrderSummary.transactionId) enrichedOrderSummary.transactionId = extractedTransactionId;
+                    if (extractedSalesRecordId && !enrichedOrderSummary.salesRecordId) enrichedOrderSummary.salesRecordId = extractedSalesRecordId;
+                    if (extractedCurrency && !enrichedOrderSummary.currency) enrichedOrderSummary.currency = extractedCurrency;
+
                     if (
                       ackStatus === "POS_PRINTED" ||
                       ackStatus === "POS_ACKNOWLEDGED" ||
@@ -939,7 +1056,21 @@ export async function pollOrderAckStatus({
                       flyingRequest = null;
                       pollSucceededCleanly = true;
                       cleanup();
-                      return { ackStatus, ackMessage, done: true };
+                      return {
+                        ackStatus,
+                        ackMessage,
+                        done: true,
+                        // 🔥🔥🔥 FIX BUG 2: PASANG SEMUA FIELD EXTRACTED DI RETURN POLLING!
+                        grandTotal: extractedGrandTotalInt,
+                        totalAmount: extractedGrandTotalInt,
+                        orderSummary: enrichedOrderSummary,
+                        items: extractedItems,
+                        tableName: extractedTableName,
+                        transactionId: extractedTransactionId,
+                        salesRecordId: extractedSalesRecordId,
+                        currency: extractedCurrency,
+                        rawBridgePayload: data,
+                      } as any;
                     }
                   } catch (_parseErr) {}
                 }
@@ -988,9 +1119,22 @@ export async function pollOrderAckStatus({
           flyingRequest ? Promise.resolve(flyingRequest.then((x: any) => x as any)).catch(() => null) : Promise.resolve(null),
         ]);
         if (resolved && (resolved as any).done === true) {
-          return (resolved as any).ackStatus
-            ? { ackStatus: (resolved as any).ackStatus, ackMessage: (resolved as any).ackMessage, error: (resolved as any).error }
-            : { ackStatus: "CANCELLED", error: (resolved as any).error };
+          const rr: any = resolved;
+          if (rr.ackStatus) {
+            // 🔥🔥🔥 FIX BUG 2 QRIS RP0: JANGAN HANYA pass ackStatus!
+            //    TERUSKAN SEMUA enriched fields (grandTotal, orderSummary, items)
+            //    dari return block L1038 di atas ke caller function.
+            const base: any = {
+              ackStatus: String(rr.ackStatus || "").trim(),
+              ackMessage: rr.ackMessage,
+              error: rr.error,
+            };
+            [ "grandTotal", "totalAmount", "orderSummary", "items", "tableName",
+              "transactionId", "salesRecordId", "currency", "rawBridgePayload"
+            ].forEach(f => { if (rr[f] !== undefined) base[f] = rr[f]; });
+            return base;
+          }
+          return { ackStatus: "CANCELLED", error: rr.error };
         }
       }
       if (statusDone) break;
@@ -1296,6 +1440,27 @@ export async function submitOrderWithPosQueueAck(
 
     if (pollResult.ackStatus === "POS_PRINTED" || pollResult.ackStatus === "POS_ACKNOWLEDGED") {
       reportProgress(100, "Pesanan diterima & dicetak dapur!", 0);
+      // 🔥🔥🔥 FIX BUG 2 QRIS RP0 (END-TO-END CLIENT):
+      //    Merge SUBMIT RESPONSE payload DENGAN polling payload:
+      //    PRIORITAS 1: polling orderSummary.grandTotalInt (data REAL dari sales_record BE Core setelah finalizeResolve)
+      //    PRIORITAS 2: submit response items/grandTotal (data awal yang dihitung client sebelum submit)
+      //    Jadi UI payment page QRIS Step 1 PASTI punya grandTotal VALID (>0), bukan Rp 0.
+      const pollGrandTotal = Number(pollResult.grandTotal ?? 0) || Number(pollResult.totalAmount ?? 0) || 0;
+      const pollOs = pollResult.orderSummary;
+      const pollOsGt = pollOs && typeof pollOs === "object" ? Number((pollOs as any).grandTotalInt ?? 0) || 0 : 0;
+      const mergedGrandTotal = pollOsGt > 0 ? pollOsGt : pollGrandTotal > 0 ? pollGrandTotal : 0;
+      const mergedItems = Array.isArray(pollResult.items) && pollResult.items.length > 0
+        ? pollResult.items as any[]
+        : (dataRoot && Array.isArray((dataRoot as any).items) ? (dataRoot as any).items : []);
+      const mergedOs = pollOs && typeof pollOs === "object"
+        ? { ...(pollOs as any) }
+        : (dataRoot && (dataRoot as any).orderSummary && typeof (dataRoot as any).orderSummary === "object" ? { ...((dataRoot as any).orderSummary) } : {});
+      mergedOs.grandTotalInt = mergedGrandTotal || Number(mergedOs.grandTotalInt ?? 0) || 0;
+      mergedOs.items = mergedItems;
+      if (pollResult.tableName && !mergedOs.tableName) mergedOs.tableName = String(pollResult.tableName);
+      if (pollResult.transactionId && !mergedOs.transactionId) mergedOs.transactionId = String(pollResult.transactionId);
+      if (pollResult.salesRecordId && !mergedOs.salesRecordId) mergedOs.salesRecordId = String(pollResult.salesRecordId);
+      if (pollResult.currency && !mergedOs.currency) mergedOs.currency = String(pollResult.currency);
       return {
         success: true,
         submissionId: echoSubmissionId,
@@ -1309,10 +1474,24 @@ export async function submitOrderWithPosQueueAck(
         retryAvailable: false,
         pollUntilAckUrl,
         data: dataRoot,
+        grandTotal: mergedGrandTotal,
+        totalAmount: mergedGrandTotal,
+        orderSummary: mergedOs,
+        items: mergedItems,
+        tableName: pollResult.tableName,
+        transactionId: pollResult.transactionId,
+        salesRecordId: pollResult.salesRecordId,
+        currency: pollResult.currency,
+        rawBridgePayload: pollResult.rawBridgePayload,
       };
     }
 
     if (pollResult.ackStatus === "FAILED_DELIVERY") {
+      const pollGrandTotal = Number(pollResult.grandTotal ?? 0) || 0;
+      const pollOsGt = pollResult.orderSummary && typeof pollResult.orderSummary === "object"
+        ? Number((pollResult.orderSummary as any).grandTotalInt ?? 0) || 0
+        : 0;
+      const mergedGrandTotal = pollOsGt > 0 ? pollOsGt : pollGrandTotal > 0 ? pollGrandTotal : 0;
       return {
         success: false,
         submissionId: echoSubmissionId,
@@ -1325,6 +1504,14 @@ export async function submitOrderWithPosQueueAck(
         queueEtaSeconds: queueEtaFromHeader,
         pollUntilAckUrl,
         error: pollResult.error ?? "Pesanan gagal dikirim ke dapur.",
+        grandTotal: mergedGrandTotal,
+        totalAmount: mergedGrandTotal,
+        orderSummary: pollResult.orderSummary,
+        items: pollResult.items as any[],
+        tableName: pollResult.tableName,
+        transactionId: pollResult.transactionId,
+        salesRecordId: pollResult.salesRecordId,
+        currency: pollResult.currency,
       };
     }
 
@@ -1334,6 +1521,11 @@ export async function submitOrderWithPosQueueAck(
         try { console.log(`[dedup:pollTimeout] Cleared dedup cache for retry (ack polling timeout 35s) key=${submitMutexKey} submissionId=${submissionId}`); } catch (_noop) {}
       }
     } catch (_noop2) {}
+    const pollGrandTotalT = Number(pollResult.grandTotal ?? 0) || 0;
+    const pollOsGtT = pollResult.orderSummary && typeof pollResult.orderSummary === "object"
+      ? Number((pollResult.orderSummary as any).grandTotalInt ?? 0) || 0
+      : 0;
+    const mergedGrandTotalT = pollOsGtT > 0 ? pollOsGtT : pollGrandTotalT > 0 ? pollGrandTotalT : 0;
     return {
       success: false,
       submissionId: echoSubmissionId,
@@ -1346,6 +1538,14 @@ export async function submitOrderWithPosQueueAck(
       queueEtaSeconds: queueEtaFromHeader,
       pollUntilAckUrl,
       error: pollResult.error ?? "Perangkat kasir tidak merespon dalam 30 detik.",
+      grandTotal: mergedGrandTotalT,
+      totalAmount: mergedGrandTotalT,
+      orderSummary: pollResult.orderSummary,
+      items: pollResult.items as any[],
+      tableName: pollResult.tableName,
+      transactionId: pollResult.transactionId,
+      salesRecordId: pollResult.salesRecordId,
+      currency: pollResult.currency,
     };
   } catch (err) {
     try { _pendingSubmitOrders.delete(submitMutexKey); } catch (_noop) {}

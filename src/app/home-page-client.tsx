@@ -1009,11 +1009,25 @@ export default function HomePage({ forcedMode }: HomePageClientProps = {}) {
                     : [],
                 })),
               subtotal:
-                Number(o.subtotal) ||
-                Number(o.grandTotal) ||
-                Number(o.totalAmount) ||
-                Number(o.total_amount) ||
-                0,
+                (() => {
+                  // 🔥🔥🔥 FIX BUG 2 QRIS RP0 (LIST ORDER):
+                  //    PRIORITAS 1: orderSummary.grandTotalInt (DATA REAL dari BE Core sales_record)
+                  //    PRIORITAS 2: grandTotal / totalAmount (TOP LEVEL dari polling response)
+                  //    PRIORITAS 3: subtotal (LEGACY BACKWARD COMPATIBLE)
+                  const osAny: any = (o as any).orderSummary;
+                  if (osAny && typeof osAny === "object") {
+                    const gt = Number(osAny.grandTotalInt ?? 0);
+                    if (!Number.isNaN(gt) && gt > 0) return gt;
+                    const gt2 = Number(osAny.grandTotal ?? 0);
+                    if (!Number.isNaN(gt2) && gt2 > 0) return gt2;
+                  }
+                  const candA = [o.grandTotal, o.totalAmount, o.total_amount, o.subtotal];
+                  for (const v of candA) {
+                    const n = Number(v ?? 0);
+                    if (!Number.isNaN(n) && n > 0) return n;
+                  }
+                  return 0;
+                })(),
               customerName: o.customerName || o.customer_name || o.customer || undefined,
               tableNumber: o.tableNumber || o.table_number || o.table || tableNumber,
               tableId: o.tableId || o.table_id || undefined,
@@ -2165,7 +2179,55 @@ export default function HomePage({ forcedMode }: HomePageClientProps = {}) {
 
   const handleCopyGrandTotal = async () => {
     try {
-      await navigator.clipboard.writeText(String(cartSummary.total));
+      // 🔥🔥🔥 FIX BUG 2 QRIS RP0 (COPY NOMINAL):
+      //    SAMA PERSIS dengan display logic di atas button Copy!
+      //    JANGAN copy dari cartSummary.total (bisa Rp 0 jika cart sudah dikosongkan
+      //    setelah Step 1 QRIS selesai). Copy dari NOMINAL YANG SEBENARNYA mau dibayar!
+      let copyNominal = 0;
+      if (pendingQrisOrder?.orderRecord) {
+        const rec: any = pendingQrisOrder.orderRecord;
+        const os = rec.orderSummary;
+        if (os && typeof os === "object") {
+          const gtInt = Number(os.grandTotalInt ?? 0);
+          if (!Number.isNaN(gtInt) && gtInt > 0) copyNominal = gtInt;
+          else {
+            const gt = Number(os.grandTotal ?? 0);
+            if (!Number.isNaN(gt) && gt > 0) copyNominal = gt;
+          }
+        }
+        if (copyNominal <= 0) {
+          const cand = [rec.grandTotal, rec.totalAmount, rec.total_amount, rec.subtotal];
+          for (const v of cand) {
+            const n = Number(v ?? 0);
+            if (!Number.isNaN(n) && n > 0) { copyNominal = n; break; }
+          }
+        }
+        if (copyNominal <= 0 && Array.isArray(rec.items)) {
+          let sum = 0;
+          for (const it of rec.items) {
+            const s = Number((it as any).subtotal ?? 0) || 0;
+            if (s > 0) sum += s;
+          }
+          if (sum > 0) copyNominal = sum;
+        }
+      }
+      if (copyNominal <= 0) {
+        const dcTotal = Number(cartSummary.total ?? 0);
+        if (!Number.isNaN(dcTotal) && dcTotal > 0) copyNominal = dcTotal;
+      }
+      if (copyNominal <= 0) {
+        const items = Array.isArray(cartItems) && cartItems.length > 0 ? cartItems : [];
+        if (items && items.length > 0) {
+          let sum = 0;
+          for (const it of items) {
+            const s = Number((it as any).subtotal ?? 0) || 0;
+            if (s > 0) sum += s;
+          }
+          if (sum > 0) copyNominal = sum;
+        }
+      }
+      if (copyNominal <= 0) copyNominal = Number(cartSummary.total ?? 0) || 0;
+      await navigator.clipboard.writeText(String(copyNominal));
       setCopySuccess("Nominal berhasil disalin.");
     } catch (_) {
       setCopySuccess("Gagal menyalin nominal.");
@@ -3148,7 +3210,55 @@ export default function HomePage({ forcedMode }: HomePageClientProps = {}) {
                         <span className="text-sm text-slate-500">Grand Total</span>
                         <div className="flex items-center gap-2">
                           <span className="text-lg font-extrabold text-orange-600">
-                            {rupiahFormatter.format(displayCartSummary.total)}
+                            {rupiahFormatter.format(
+                              (() => {
+                                // 🔥🔥🔥 FIX BUG 2 QRIS RP0 (DISPLAY GRAND TOTAL QRIS STEP 1 & 2):
+                                //    MASALAH: DULU SELALU pakai displayCartSummary.total.
+                                //    JIKA Step 1 sudah selesai (checker sudah tercetak ke dapur) →
+                                //    user TAMBAH pesanan baru / cart jadi KOSONG →
+                                //    displayCartSummary.total = 0 → Grand Total QRIS STEP 2 YANG SEHARUSNYA
+                                //    Rp 15.000 MALAH JADI Rp 0! (user report Bug 2 "QRIS Rp 0").
+                                //    SOLUSI PRIORITY:
+                                //      1) PENDING QRIS ORDER (qrisFirstStepCompleted=true) →
+                                //         pakai TOTAL dari orderRecord (order yang BENAR yang mau dibayar),
+                                //         enriched dengan orderSummary.grandTotalInt JIKA ada.
+                                //      2) Fallback displayCartSummary (Step 1 sebelum order dikirim).
+                                if (pendingQrisOrder?.orderRecord) {
+                                  const rec: any = pendingQrisOrder.orderRecord;
+                                  const os = rec.orderSummary;
+                                  if (os && typeof os === "object") {
+                                    const gtInt = Number(os.grandTotalInt ?? 0);
+                                    if (!Number.isNaN(gtInt) && gtInt > 0) return gtInt;
+                                    const gt = Number(os.grandTotal ?? 0);
+                                    if (!Number.isNaN(gt) && gt > 0) return gt;
+                                  }
+                                  const cand = [rec.grandTotal, rec.totalAmount, rec.total_amount, rec.subtotal];
+                                  for (const v of cand) {
+                                    const n = Number(v ?? 0);
+                                    if (!Number.isNaN(n) && n > 0) return n;
+                                  }
+                                  if (Array.isArray(rec.items)) {
+                                    let sum = 0;
+                                    for (const it of rec.items) {
+                                      const s = Number((it as any).subtotal ?? 0) || 0;
+                                      if (s > 0) sum += s;
+                                    }
+                                    if (sum > 0) return sum;
+                                  }
+                                }
+                                const dcTotal = Number(cartSummary.total ?? 0);
+                                if (!Number.isNaN(dcTotal) && dcTotal > 0) return dcTotal;
+                                if (Array.isArray(cartItems) && cartItems.length > 0) {
+                                  let sum = 0;
+                                  for (const it of cartItems) {
+                                    const s = Number((it as any).subtotal ?? 0) || 0;
+                                    if (s > 0) sum += s;
+                                  }
+                                  if (sum > 0) return sum;
+                                }
+                                return 0;
+                              })()
+                            )}
                           </span>
                           <button
                             type="button"
