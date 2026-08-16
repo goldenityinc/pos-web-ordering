@@ -883,23 +883,17 @@ export async function pollOrderAckStatus({
 
       let statusDone = false;
       if (flyingRequest === null) {
-        // 🔴 CRITICAL FIX POLL ACK DESYNC (Fallback Dup Candidate):
-        //    Bridge Idempotency Rewrite V2 ubah submissionId collision menjadi
-        //    ORIGINAL__dup_1..99. Frontend polling pakai ORIGINAL key (tanpa suffix).
-        //    Jika Bridge belum deploy versi mirror (yang set 2 key sekaligus), polling
-        //    ORIGINAL => NULL => TIMEOUT padahal POS sukses print!
-        //    SOLUSI (double safety layer): Build array candidates = ORIGINAL + __dup_1..5.
-        //    Loop semua candidate dalam SATU polling tick — jika salah satu return
-        //    POS_PRINTED / POS_ACKNOWLEDGED = langsung anggap SUCCESS.
+        // 🧹 PHASE 3: Stateless Polling (ORIGINAL ID ONLY).
+        //    Bridge sudah TIDAK PERNAH rewrite submissionId dengan __dup_N suffix
+        //    (Phase 1 Dumb Relay). Jadi polling HANYA pakai submissionId ASLI / orderId.
+        //    (Candidate array TETAP ADA agar bisa fall back ke orderId jika ada, tapi
+        //    TIDAK ada lagi loop __dup_1..5 yang redundant & bikin lambat polling).
         const candidatePathSegments: string[] = [];
         if (orderId !== undefined && orderId !== null && String(orderId).trim() !== "") {
           candidatePathSegments.push(encodeURIComponent(String(orderId)));
         } else if (submissionId) {
+          // HANYA 1 candidate: submissionId ASLI (tanpa suffix).
           candidatePathSegments.push(`by-submission/${encodeURIComponent(submissionId)}`);
-          const MAX_REWRITE_CANDIDATES = 5;
-          for (let i = 1; i <= MAX_REWRITE_CANDIDATES; i++) {
-            candidatePathSegments.push(`by-submission/${encodeURIComponent(`${submissionId}__dup_${i}`)}`);
-          }
         }
 
         if (candidatePathSegments.length === 0) {
@@ -912,8 +906,8 @@ export async function pollOrderAckStatus({
 
         const fetchPromise = (async () => {
           try {
-            // Loop semua candidate (ORIGINAL + dup_1..5) di dalam 1 polling tick.
-            // Berhenti di candidate pertama yang mereturn status terminal.
+            // Loop candidates (biasanya cuma 1: orderId ATAU submissionId ASLI).
+            // Berhenti di candidate pertama yang return status terminal.
             for (let ci = 0; ci < candidatePathSegments.length; ci++) {
               const pathSegment = candidatePathSegments[ci];
               try {

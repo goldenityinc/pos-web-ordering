@@ -283,40 +283,10 @@ export default function HomePage({ forcedMode }: HomePageClientProps = {}) {
   const orderListPollingFlyingRef = useRef<boolean>(false);
   const orderListPollingStopRef = useRef<boolean>(false);
 
-  // 🔴🔴 CRITICAL CROSS-TAB SAME-TABLE CONCURRENT SUBMIT LOCK (TTL 500ms):
-  //    User buka 2 tab browser untuk MEJA YANG SAMA, submit SIMULTAN →
-  //    2 submissionId SAMA (Date.now() collision) → Bridge hanya simpan 1 order,
-  //    1 order HILANG TOTAL. Juga mencegah double-click gila user pada button Bayar.
-  //    Strategy: Map<scopeTableKey, lastSubmitAtMs> pakai useRef (share antar rerender)
-  //    + LocalStorage fallback (cross-tab sync via storage event optional — cukup ref
-  //      untuk mencegah double-click bersamaan di TAB YANG SAMA).
-  const __TABLE_SUBMIT_LOCK_TTL_MS = 500;
-  const tableSubmitLocksRef = useRef<Map<string, number>>(new Map());
-  const _tryAcquireTableSubmitLock = (opts?: { overrideTableId?: string; overrideTableNum?: string }): { ok: boolean; waitMs?: number } => {
-    try {
-      const now = Date.now();
-      // GC stale locks TTL. Pakai Array.from().forEach() agar compatible dgn TS target ES5/2015
-      // tanpa flag --downlevelIteration (fix TS2802 MapIterator iteration error).
-      Array.from(tableSubmitLocksRef.current.entries()).forEach(([k, v]) => {
-        if ((now - v) > __TABLE_SUBMIT_LOCK_TTL_MS) tableSubmitLocksRef.current.delete(k);
-      });
-      const tnt = (tenantId || "").toString().trim().toLowerCase();
-      const br = (branchId || "").toString().trim().toLowerCase();
-      const ti = ((opts?.overrideTableId ?? tableId) || "").toString().trim().toLowerCase();
-      const tn = ((opts?.overrideTableNum ?? tableNumber) || "").toString().trim().toLowerCase();
-      const key = `${tnt}::${br}::id:${ti}::no:${tn}`;
-      const last = tableSubmitLocksRef.current.get(key);
-      if (last && (now - last) < __TABLE_SUBMIT_LOCK_TTL_MS) {
-        const wait = __TABLE_SUBMIT_LOCK_TTL_MS - (now - last) + 50;
-        return { ok: false, waitMs: wait };
-      }
-      tableSubmitLocksRef.current.set(key, now);
-      return { ok: true };
-    } catch (_e) {
-      try { console.warn("[table-lock] silent error, allow submit", (_e as any)?.message || String(_e)); } catch (_) {}
-      return { ok: true };
-    }
-  };
+  // 🧹 PHASE 3: NO MORE TTL/useRef LOCKS (Stateless Polling)
+  //    Anti double-click HANYA andalkan `isSubmitting` React state (guard clause
+  //    di awal setiap handler). TTL locks (useRef + Map) dihapus agar alur
+  //    sederhana, tidak ada stale lock yang bikin UI nyangkut.
   const [activeTab, setActiveTab] = useState<"menu" | "orderList">("menu");
   const [orderList, setOrderList] = useState<OrderRecord[]>([]);
   const [paymentMethod, setPaymentMethod] = useState<"CASHIER" | "QRIS">("CASHIER");
@@ -1525,22 +1495,8 @@ export default function HomePage({ forcedMode }: HomePageClientProps = {}) {
     const order = orderList.find((o) => o.submissionId === submissionId);
     if (!order) return;
 
-    // 🔴 LAYER-0: SAME-TABLE CONCURRENT SUBMIT LOCK (500ms TTL)
-    //    Retry bisa beda table dari URL scope → override via order metadata.
-    const lock0 = _tryAcquireTableSubmitLock({
-      overrideTableId: order.tableId ? String(order.tableId) : undefined,
-      overrideTableNum: order.tableNumber ? String(order.tableNumber) : undefined,
-    });
-    if (!lock0.ok) {
-      const waitSec = Math.max(1, Math.ceil((lock0.waitMs ?? 500) / 1000));
-      try {
-        showSnackbar(
-          `Meja ${order.tableNumber || ""} sedang memproses order sebelumnya, coba lagi ${waitSec} detik lagi.`,
-          "error",
-        );
-      } catch (_) {}
-      return;
-    }
+    // 🧹 PHASE 3: Stateless — cukup andalkan isSubmitting + order state guard.
+    if (isSubmitting) return;
 
     const txId = order.transactionId || activeTransactionId || getOrCreateTransactionId();
 
@@ -1652,22 +1608,8 @@ export default function HomePage({ forcedMode }: HomePageClientProps = {}) {
       return;
     }
 
-    // 🔴 LAYER-0: SAME-TABLE CONCURRENT SUBMIT LOCK (500ms TTL)
-    //    Replay bisa beda table dari URL scope → override via order metadata.
-    const lock0 = _tryAcquireTableSubmitLock({
-      overrideTableId: order.tableId ? String(order.tableId) : undefined,
-      overrideTableNum: order.tableNumber ? String(order.tableNumber) : undefined,
-    });
-    if (!lock0.ok) {
-      const waitSec = Math.max(1, Math.ceil((lock0.waitMs ?? 500) / 1000));
-      try {
-        showSnackbar(
-          `Meja ${order.tableNumber || ""} sedang memproses order sebelumnya, coba lagi ${waitSec} detik lagi.`,
-          "error",
-        );
-      } catch (_) {}
-      return;
-    }
+    // 🧹 PHASE 3: Stateless — cukup andalkan isSubmitting.
+    if (isSubmitting) return;
 
     const txId = order.transactionId || activeTransactionId;
     if (!txId && !order.submissionId) {
@@ -1821,23 +1763,8 @@ export default function HomePage({ forcedMode }: HomePageClientProps = {}) {
     overrideSubmissionId?: string,
     isRetryCall = false,
   ) => {
-    // 🔴 LAYER-0: SAME-TABLE CONCURRENT SUBMIT LOCK (500ms TTL)
-    //    Mencegah collision 2 tab browser SAME TABLE submit simultan →
-    //    submissionId Date.now() sama → Bridge idempotency rename →
-    //    POS hanya terima 1 order (Bug C & E). Juga block double-click gila user.
-    const lock0 = _tryAcquireTableSubmitLock();
-    if (!lock0.ok) {
-      const waitSec = Math.max(1, Math.ceil((lock0.waitMs ?? 500) / 1000));
-      try {
-        showSnackbar(
-          `Meja sedang memproses order sebelumnya, coba lagi ${waitSec} detik lagi.`,
-          "error",
-        );
-      } catch (_) {}
-      return;
-    }
-
-    // 🔴 GUARD CLAUSE PALING ATAS - MENCEGAH DOUBLE CLICK / SPAM
+    // 🧹 PHASE 3: Stateless. Anti double-click HANYA andalkan isSubmitting state.
+    //    (Lokasi guard clause PINDAH KE ATAS SEMUA — agar tidak ada race window).
     if (isSubmitting) return;
 
     if (!tenantId) {
